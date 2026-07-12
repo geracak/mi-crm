@@ -37,6 +37,11 @@ yarn-error.log*
 # vercel
 .vercel
 
+# convex - regenerated on every `npx convex dev` / `npx convex deploy`
+# (the build script runs `convex deploy` before `next build`, so this is
+# always fresh in CI/Railway too - never commit a possibly-stale copy).
+/convex/_generated/
+
 # claude code local settings
 **/.claude/settings.local.json
 

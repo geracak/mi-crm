@@ -1,36 +1,38 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Vibe CRM
 
-## Getting Started
+CRM responsive para pequeños negocios (Next.js 16 App Router + Convex + Tailwind CSS v4).
 
-First, run the development server:
+## Desarrollo local
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npx convex dev    # deja esto corriendo en una terminal - watch de funciones/schema
+npm run dev       # en otra terminal
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Variables de entorno locales (`.env.local`, ver `.env.local.example`):
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- `NEXT_PUBLIC_CONVEX_URL` / `CONVEX_DEPLOYMENT` - las genera `npx convex dev` la primera vez.
+- `ALLOW_DEV_SEED` (variable de **deployment** de Convex, no de este archivo - se setea con `npx convex env set ALLOW_DEV_SEED true`) - habilita las mutations de datos de prueba en `convex/seed.ts`. **Nunca setear en el deployment de producción.**
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Para poblar datos de prueba en el deployment de dev:
 
-## Learn More
+```bash
+npx convex run seed:seedDemoData
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Deploy en Railway
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+El build de este repo está configurado para desplegar las funciones de Convex a **producción** y buildear Next.js en un solo paso (`package.json` → `"build": "convex deploy --cmd-url-env-var-name NEXT_PUBLIC_CONVEX_URL --cmd \"next build\""`). Railway detecta el proyecto Node/Next.js automáticamente (Nixpacks); `railway.json` fija el comando de arranque.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+**Configuración única requerida en Railway** (Settings → Variables del servicio):
 
-## Deploy on Vercel
+- `CONVEX_DEPLOY_KEY` - deploy key del deployment de **producción** de Convex. Se genera desde el [dashboard de Convex](https://dashboard.convex.dev) → proyecto → Settings → Deploy Keys → Production. Con esta variable seteada, cada build de Railway ejecuta `convex deploy`, que sube schema/funciones a producción e inyecta automáticamente `NEXT_PUBLIC_CONVEX_URL` (no hace falta setearla a mano).
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+No setear `ALLOW_DEV_SEED` en el deployment de producción de Convex - las mutations de `convex/seed.ts` son solo para desarrollo local (ver comentario en ese archivo).
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Stack
+
+- Next.js 16 (App Router, Turbopack) + TypeScript estricto
+- Convex (backend/datos en tiempo real)
+- Tailwind CSS v4 (tokens de diseño en `src/app/globals.css`, portados desde `design/`)
