@@ -1,32 +1,24 @@
 import { v } from "convex/values";
-import { mutation } from "./_generated/server";
+import { internalMutation } from "./_generated/server";
 import { DEMO_USER_EMAIL } from "./users";
 
-// ⚠️ DEV-ONLY. Ambas mutations exigen la variable de entorno
-// ALLOW_DEV_SEED="true" configurada en el deployment (`npx convex env set
-// ALLOW_DEV_SEED true`, ver .env.local.example) - sin ella, cualquier
-// llamada falla sin importar quién la invoque, no depende de que nadie
-// respete el comentario.
+// ⚠️ DEV-ONLY, con autorización real (no un interruptor por env var):
+// definidas como `internalMutation`, NO `mutation` - Convex no las expone en
+// absoluto en la API pública (`api.*`), solo en `internal.*`. Ningún cliente
+// (browser, ConvexReactClient, ConvexHttpClient con URL pública) puede
+// invocarlas jamás, sin importar el deployment. Solo se pueden correr desde:
+// (a) la CLI/dashboard de Convex autenticados como miembro del equipo del
+// proyecto (`npx convex run seed:seedDemoData`), o (b) otra función del
+// servidor que las llame explícitamente (no aplica acá). Este es el
+// reemplazo real de la guardia anterior por variable de entorno que la
+// auditoría había marcado como insuficiente (interruptor de deployment, no
+// autorización) - el control de acceso ahora es estructural, impuesto por
+// el framework, no por disciplina de proceso.
 //
-// Límite real de esta guardia (no es autorización): NO es un control de
-// acceso por usuario/rol - es un interruptor a nivel de deployment. Mientras
-// ALLOW_DEV_SEED esté seteado en un deployment, cualquiera con la URL de ese
-// deployment puede invocar estas mutations (no hay auth todavía - GER-217).
-// Mitigación aceptada para este alcance: nunca setear ALLOW_DEV_SEED en un
-// deployment de producción ni en uno compartido/expuesto públicamente -
-// solo en deployments locales/efímeros de desarrollo. Autorización real por
-// usuario llega con GER-217.
-//
-// ⛔ ANTES DE CUALQUIER DEPLOYMENT PRODUCTIVO/COMPARTIDO (bloqueante, no
-// opcional): eliminar este archivo (convex/seed.ts) del deployment, o - si
-// GER-217 (auth real) ya está resuelto - reemplazar assertDevMutationsAllowed
-// por una verificación de rol/sesión real. No alcanza con dejar
-// ALLOW_DEV_SEED sin setear: mientras el archivo exista en el deployment,
-// sigue siendo código desplegado que depende de disciplina de proceso, no de
-// un control técnico por-deployment. Este seed.ts es intencionalmente
-// desechable: existe solo para poblar datos de prueba en desarrollo local
-// mientras no hay pantallas de alta de clientes/seguimientos (GER-27/28) ni
-// login (GER-217).
+// ALLOW_DEV_SEED se mantiene como defensa en profundidad adicional (evita
+// que un miembro del equipo con acceso legítimo a la CLI ejecute esto por
+// error contra un deployment que no lo tenga seteado) - ver
+// .env.local.example. Nunca setear en el deployment de producción.
 function assertDevMutationsAllowed() {
   if (process.env.ALLOW_DEV_SEED !== "true") {
     throw new Error(
@@ -37,7 +29,7 @@ function assertDevMutationsAllowed() {
 
 const DIA_MS = 24 * 60 * 60 * 1000;
 
-export const seedDemoData = mutation({
+export const seedDemoData = internalMutation({
   args: {},
   handler: async (ctx) => {
     assertDevMutationsAllowed();
@@ -106,7 +98,7 @@ export const seedDemoData = mutation({
 // Mecanismo explícito para probar el gating de rol (ej. /equipo) sin login
 // real: cambia el rol del ÚNICO usuario que `users.getCurrent` puede ver.
 // No crea usuarios nuevos ni toca ningún otro campo.
-export const setDemoUserRole = mutation({
+export const setDemoUserRole = internalMutation({
   args: { rol: v.union(v.literal("propietaria"), v.literal("comercial")) },
   handler: async (ctx, { rol }) => {
     assertDevMutationsAllowed();
