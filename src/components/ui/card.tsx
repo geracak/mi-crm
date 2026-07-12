@@ -1,47 +1,43 @@
+import { cn } from "@/lib/utils";
 import type { HTMLAttributes, ReactNode } from "react";
-import { cn } from "@/lib/cn";
 
-interface CardProps extends Omit<HTMLAttributes<HTMLElement>, "title"> {
-  title?: ReactNode;
+interface CardProps extends HTMLAttributes<HTMLDivElement> {
+  title?: string;
   action?: ReactNode;
-  onAction?: () => void;
+  /** "0" quita el padding interno (listas que gestionan su propio espaciado). */
+  padding?: "default" | "none";
 }
 
 export function Card({
   title,
   action,
-  onAction,
-  children,
+  padding = "default",
   className,
-  ...rest
+  children,
+  ...props
 }: CardProps) {
   return (
-    <section
+    <div
       className={cn(
-        "rounded-xl border border-border bg-surface p-5 shadow-xs",
+        "rounded-xl border border-border bg-surface shadow-xs",
+        padding === "default" && "p-5",
         className,
       )}
-      {...rest}
+      {...props}
     >
       {(title || action) && (
-        <header className="mb-4 flex items-center justify-between gap-3">
+        <div className="mb-3.5 flex items-center justify-between gap-3">
           {title && (
-            <h3 className="m-0 text-[15px] font-semibold tracking-tight text-text">
-              {title}
-            </h3>
+            <h3 className="text-[15px] font-semibold text-text">{title}</h3>
           )}
           {action && (
-            <button
-              type="button"
-              onClick={onAction}
-              className="cursor-pointer border-none bg-transparent p-0 text-sm font-medium text-primary"
-            >
+            <span className="text-[13px] font-semibold text-primary">
               {action}
-            </button>
+            </span>
           )}
-        </header>
+        </div>
       )}
       {children}
-    </section>
+    </div>
   );
 }

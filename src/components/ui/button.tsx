@@ -1,5 +1,6 @@
-import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { cn } from "@/lib/cn";
+import { cn } from "@/lib/utils";
+import { Loader2 } from "lucide-react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
 
 type Variant = "primary" | "secondary" | "ghost" | "destructive";
 type Size = "default" | "compact";
@@ -9,61 +10,48 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: Size;
   loading?: boolean;
   iconLeft?: ReactNode;
-  iconRight?: ReactNode;
 }
 
-const variantClasses: Record<Variant, string> = {
+const base =
+  "inline-flex items-center justify-center gap-2 rounded-md font-medium text-[15px] transition-colors duration-150 ease-[var(--ease-standard)] disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-text-subtle disabled:border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-surface focus-visible:ring-focus";
+
+const variants: Record<Variant, string> = {
   primary:
-    "bg-primary text-on-primary font-semibold hover:bg-primary-hover active:bg-primary-active",
+    "bg-primary text-on-primary font-semibold hover:bg-primary-hover active:bg-primary-active border border-transparent",
   secondary:
-    "bg-surface text-text font-medium border-border-strong hover:bg-surface-2",
-  ghost: "bg-transparent text-text-muted font-medium hover:bg-surface-2",
-  destructive: "bg-error text-white font-semibold hover:brightness-90",
+    "bg-surface text-text border border-border-strong hover:bg-surface-2",
+  ghost: "bg-transparent text-text-muted hover:bg-surface-2 border border-transparent",
+  destructive:
+    "bg-error text-white font-semibold hover:brightness-90 border border-transparent",
 };
 
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  (
-    {
-      variant = "primary",
-      size = "default",
-      loading = false,
-      disabled = false,
-      iconLeft,
-      iconRight,
-      className,
-      children,
-      type = "button",
-      ...rest
-    },
-    ref,
-  ) => {
-    const isDisabled = disabled || loading;
-    return (
-      <button
-        ref={ref}
-        type={type}
-        disabled={isDisabled}
-        className={cn(
-          "inline-flex items-center justify-center gap-2 rounded-md border border-transparent px-5 text-[15px] leading-none tracking-tight whitespace-nowrap select-none transition-colors duration-150 [transition-timing-function:var(--ease-standard)]",
-          size === "compact" ? "h-11" : "h-12",
-          isDisabled
-            ? "cursor-not-allowed bg-surface-2 text-text-subtle border-border"
-            : cn("cursor-pointer", variantClasses[variant]),
-          className,
-        )}
-        {...rest}
-      >
-        {loading && (
-          <span
-            aria-hidden="true"
-            className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white"
-          />
-        )}
-        {!loading && iconLeft}
-        {children}
-        {!loading && iconRight}
-      </button>
-    );
-  },
-);
-Button.displayName = "Button";
+const sizes: Record<Size, string> = {
+  default: "h-12 px-5",
+  compact: "h-11 px-4",
+};
+
+export function Button({
+  variant = "primary",
+  size = "default",
+  loading = false,
+  iconLeft,
+  disabled,
+  className,
+  children,
+  ...props
+}: ButtonProps) {
+  return (
+    <button
+      className={cn(base, variants[variant], sizes[size], className)}
+      disabled={disabled || loading}
+      {...props}
+    >
+      {loading ? (
+        <Loader2 className="size-4 animate-spin" aria-hidden />
+      ) : (
+        iconLeft
+      )}
+      {children}
+    </button>
+  );
+}

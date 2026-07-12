@@ -1,23 +1,35 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
-import { ConvexClientProvider } from "@/components/providers/convex-client-provider";
+import { ConvexAuthNextjsServerProvider } from "@convex-dev/auth/nextjs/server";
+import { Providers } from "./providers";
 import "./globals.css";
 
 const inter = Inter({
-  variable: "--font-sans",
   subsets: ["latin"],
+  variable: "--font-inter",
   weight: ["400", "500", "600"],
+  display: "swap",
 });
 
-const jetBrainsMono = JetBrains_Mono({
-  variable: "--font-mono",
+const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
   weight: ["400", "500"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
   title: "Vibe CRM",
-  description: "Vibe CRM",
+  description:
+    "CRM para pequeños negocios de ventas digitales: organiza tus clientes y no pierdas ventas por falta de seguimiento.",
+  manifest: "/manifest.json",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#16a34a",
 };
 
 export default function RootLayout({
@@ -26,14 +38,12 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html
-      lang="es"
-      data-scroll-behavior="smooth"
-      className={`${inter.variable} ${jetBrainsMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex flex-col bg-bg text-text">
-        <ConvexClientProvider>{children}</ConvexClientProvider>
-      </body>
-    </html>
+    <ConvexAuthNextjsServerProvider>
+      <html lang="es" className={`${inter.variable} ${jetbrainsMono.variable}`}>
+        <body className="antialiased">
+          <Providers>{children}</Providers>
+        </body>
+      </html>
+    </ConvexAuthNextjsServerProvider>
   );
 }

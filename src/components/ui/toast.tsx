@@ -1,98 +1,27 @@
 "use client";
 
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
-
-interface ToastItem {
-  id: number;
+interface ToastProps {
   message: string;
-  undoLabel?: string;
-  onUndo?: () => void;
+  action?: { label: string; onClick: () => void };
 }
 
-interface ShowToastOptions {
-  undoLabel?: string;
-  onUndo?: () => void;
-}
-
-interface ToastContextValue {
-  show: (message: string, options?: ShowToastOptions) => void;
-}
-
-const ToastContext = createContext<ToastContextValue | null>(null);
-
-// Cola simple: cada toast se muestra por su propia duración y no reemplaza
-// al anterior - marcar dos seguimientos seguidos no pierde el "Deshacer" del
-// primero (a diferencia del prototipo .dc.html, que sí reemplazaba el toast).
-export function ToastProvider({ children }: { children: ReactNode }) {
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const nextId = useRef(0);
-  const timers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
-
-  const dismiss = useCallback((id: number) => {
-    const timer = timers.current.get(id);
-    if (timer) clearTimeout(timer);
-    timers.current.delete(id);
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
-
-  const show = useCallback(
-    (message: string, options?: ShowToastOptions) => {
-      const id = nextId.current++;
-      const item: ToastItem = {
-        id,
-        message,
-        undoLabel: options?.onUndo ? "Deshacer" : undefined,
-        onUndo: options?.onUndo,
-      };
-      setToasts((prev) => [...prev, item]);
-      const duration = options?.onUndo ? 3800 : 2600;
-      const timer = setTimeout(() => dismiss(id), duration);
-      timers.current.set(id, timer);
-    },
-    [dismiss],
-  );
-
+/** Aviso breve abajo-centro, con acción opcional (p. ej. "Deshacer"). */
+export function Toast({ message, action }: ToastProps) {
   return (
-    <ToastContext.Provider value={{ show }}>
-      {children}
-      <div
-        className="pointer-events-none fixed inset-x-0 z-[1100] flex flex-col items-center gap-2 px-4 bottom-[84px] md:bottom-6"
-        aria-live="polite"
-      >
-        {toasts.map((t) => (
-          <div
-            key={t.id}
-            className="animate-vibe-slide-up pointer-events-auto flex w-full max-w-[440px] items-center gap-3 rounded-xl bg-text py-3 pr-2.5 pl-4 text-white shadow-lg md:w-auto"
-          >
-            <span className="text-sm">{t.message}</span>
-            {t.onUndo && (
-              <button
-                type="button"
-                onClick={() => {
-                  t.onUndo?.();
-                  dismiss(t.id);
-                }}
-                className="cursor-pointer border-none bg-transparent px-2 py-1.5 text-sm font-semibold whitespace-nowrap text-primary"
-              >
-                {t.undoLabel}
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
-    </ToastContext.Provider>
+    <div
+      role="status"
+      className="fixed bottom-20 left-1/2 z-50 flex -translate-x-1/2 items-center gap-4 rounded-lg bg-text px-4 py-3 text-[14px] text-surface shadow-lg animate-[vibe-slide-up_150ms_ease] md:bottom-6"
+    >
+      <span>{message}</span>
+      {action && (
+        <button
+          type="button"
+          onClick={action.onClick}
+          className="font-semibold text-[#4ade80] hover:underline"
+        >
+          {action.label}
+        </button>
+      )}
+    </div>
   );
-}
-
-export function useToast() {
-  const ctx = useContext(ToastContext);
-  if (!ctx) throw new Error("useToast debe usarse dentro de <ToastProvider>");
-  return ctx;
 }

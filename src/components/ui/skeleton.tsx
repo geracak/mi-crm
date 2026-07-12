@@ -1,17 +1,19 @@
-import { cn } from "@/lib/cn";
+import { cn } from "@/lib/utils";
+import type { CSSProperties } from "react";
 
 interface SkeletonProps {
-  width?: string | number;
-  height?: string | number;
+  width?: number | string;
+  height?: number | string;
+  radius?: number | string;
   className?: string;
 }
 
-export function Skeleton({ width = "100%", height = 16, className }: SkeletonProps) {
-  return (
-    <span
-      aria-hidden="true"
-      className={cn("block animate-pulse rounded-md bg-surface-2", className)}
-      style={{ width, height }}
-    />
-  );
+export function Skeleton({ width = "100%", height = 16, radius = 6, className }: SkeletonProps) {
+  const style: CSSProperties = {
+    width,
+    height,
+    borderRadius: radius,
+    animation: "vibe-pulse 1.4s ease-in-out infinite",
+  };
+  return <div className={cn("bg-surface-2", className)} style={style} aria-hidden />;
 }

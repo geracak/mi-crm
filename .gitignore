@@ -32,22 +32,24 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
-!.env.local.example
+!.env.example
 
 # vercel
 .vercel
 
-# convex/_generated is intentionally COMMITTED, not ignored here: in
-# `convex deploy --cmd "next build"`, the wrapped build command runs before
-# codegen/push finish, so a fresh Railway clone has no convex/_generated at
-# all when `next build` resolves its imports (confirmed via a real failed
-# Railway build - "Module not found: .../convex/_generated/api"). It's
-# regenerated locally by `npx convex dev` and re-committed like any other
-# generated-but-required build input (e.g. package-lock.json).
-
-# claude code local settings
-**/.claude/settings.local.json
-
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# convex: `_generated` SÍ se versiona para que `npm run build` sea reproducible
+# desde un checkout limpio (Railway build no ejecuta codegen, y `convex codegen`
+# requiere credenciales del deployment). Regenerar con `npx convex dev`.
+
+# credenciales de convex exclusivas de esta carpeta (nunca commitear)
+.convex-home/
+
+# artefactos de herramientas de desarrollo (MCP, etc.)
+.playwright-mcp/
+
+# claude code local settings (per-machine, no compartir)
+**/.claude/settings.local.json

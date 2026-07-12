@@ -1,39 +1,59 @@
+import { cn } from "@/lib/utils";
 import type { ReactNode } from "react";
-import { cn } from "@/lib/cn";
 
-type Status = "success" | "warning" | "error" | "info" | "primary" | "neutral";
-
-const statusClasses: Record<Status, { bg: string; text: string; dot: string }> = {
-  success: { bg: "bg-success-bg", text: "text-success-text", dot: "bg-success" },
-  warning: { bg: "bg-warning-bg", text: "text-warning-text", dot: "bg-warning" },
-  error: { bg: "bg-error-bg", text: "text-error-text", dot: "bg-error" },
-  info: { bg: "bg-info-bg", text: "text-info-text", dot: "bg-info" },
-  primary: { bg: "bg-primary-subtle", text: "text-primary", dot: "bg-primary" },
-  neutral: { bg: "bg-surface-2", text: "text-text-muted", dot: "bg-text-muted" },
-};
+export type BadgeStatus =
+  | "success"
+  | "warning"
+  | "error"
+  | "info"
+  | "primary"
+  | "neutral";
 
 interface BadgeProps {
-  children: ReactNode;
-  status?: Status;
+  status?: BadgeStatus;
   dot?: boolean;
+  children: ReactNode;
   className?: string;
 }
 
-export function Badge({ children, status = "neutral", dot = true, className }: BadgeProps) {
-  const s = statusClasses[status];
+const styles: Record<BadgeStatus, { chip: string; dot: string }> = {
+  success: { chip: "bg-success-bg text-success-text", dot: "bg-success" },
+  warning: { chip: "bg-warning-bg text-warning-text", dot: "bg-warning" },
+  error: { chip: "bg-error-bg text-error-text", dot: "bg-error" },
+  info: { chip: "bg-info-bg text-info-text", dot: "bg-info" },
+  primary: { chip: "bg-primary-subtle text-primary", dot: "bg-primary" },
+  neutral: {
+    chip: "bg-surface-2 text-text-muted border border-border",
+    dot: "bg-text-subtle",
+  },
+};
+
+/** Etiquetas en español para los estados de cliente/venta que usa el CRM. */
+export const STATUS_LABELS: Record<BadgeStatus, string> = {
+  info: "Nuevo lead",
+  primary: "En negociación",
+  warning: "Pendiente",
+  success: "Ganado",
+  error: "Perdido",
+  neutral: "Borrador",
+};
+
+export function Badge({
+  status = "neutral",
+  dot = true,
+  children,
+  className,
+}: BadgeProps) {
+  const s = styles[status];
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-2 whitespace-nowrap rounded-full px-3 py-[5px] text-[13px] font-medium tracking-tight",
-        s.bg,
-        s.text,
-        status === "neutral" && "border border-border",
+        "inline-flex items-center gap-1.5 rounded-full px-3 py-[5px] text-[13px] font-medium",
+        s.chip,
         className,
       )}
     >
-      {dot && (
-        <span aria-hidden="true" className={cn("h-[7px] w-[7px] shrink-0 rounded-full", s.dot)} />
-      )}
+      {dot && <span className={cn("size-[7px] shrink-0 rounded-full", s.dot)} />}
       {children}
     </span>
   );

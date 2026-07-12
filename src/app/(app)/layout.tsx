@@ -1,9 +1,24 @@
-import type { ReactNode } from "react";
-import { AppShell } from "@/components/shell/app-shell";
+import { Sidebar } from "@/components/layout/Sidebar";
+import { MobileHeader } from "@/components/layout/MobileHeader";
+import { TabBarNav } from "@/components/layout/TabBarNav";
 
-// TODO(GER-217): agregar proxy.ts que redirija a /login si no hay sesión.
-// Por ahora el shell renderiza siempre "autenticado" con el usuario demo
-// sembrado (ver convex/users.ts) - no hay enforcement de rutas todavía.
-export default function AppLayout({ children }: { children: ReactNode }) {
-  return <AppShell>{children}</AppShell>;
+export default function AppShellLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex h-dvh w-full bg-bg">
+      <Sidebar />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <MobileHeader />
+        <main className="flex-1 overflow-y-auto">
+          <div className="mx-auto w-full max-w-[860px] px-4 py-4 md:px-8 md:py-7">
+            {children}
+          </div>
+        </main>
+        <TabBarNav className="md:hidden" />
+      </div>
+    </div>
+  );
 }

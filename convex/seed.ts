@@ -1,117 +1,64 @@
 import { v } from "convex/values";
-import { internalMutation } from "./_generated/server";
-import { DEMO_USER_EMAIL } from "./users";
+import { internalAction, internalQuery } from "./_generated/server";
+import { createAccount } from "@convex-dev/auth/server";
+import { internal } from "./_generated/api";
+import type { DataModel } from "./_generated/dataModel";
 
-// ⚠️ DEV-ONLY, con autorización real (no un interruptor por env var):
-// definidas como `internalMutation`, NO `mutation` - Convex no las expone en
-// absoluto en la API pública (`api.*`), solo en `internal.*`. Ningún cliente
-// (browser, ConvexReactClient, ConvexHttpClient con URL pública) puede
-// invocarlas jamás, sin importar el deployment. Solo se pueden correr desde:
-// (a) la CLI/dashboard de Convex autenticados como miembro del equipo del
-// proyecto (`npx convex run seed:seedDemoData`), o (b) otra función del
-// servidor que las llame explícitamente (no aplica acá). Este es el
-// reemplazo real de la guardia anterior por variable de entorno que la
-// auditoría había marcado como insuficiente (interruptor de deployment, no
-// autorización) - el control de acceso ahora es estructural, impuesto por
-// el framework, no por disciplina de proceso.
-//
-// ALLOW_DEV_SEED se mantiene como defensa en profundidad adicional (evita
-// que un miembro del equipo con acceso legítimo a la CLI ejecute esto por
-// error contra un deployment que no lo tenga seteado) - ver
-// .env.local.example. Nunca setear en el deployment de producción.
-function assertDevMutationsAllowed() {
-  if (process.env.ALLOW_DEV_SEED !== "true") {
-    throw new Error(
-      "Mutation dev-only deshabilitada: falta ALLOW_DEV_SEED=true en este deployment.",
-    );
-  }
-}
-
-const DIA_MS = 24 * 60 * 60 * 1000;
-
-export const seedDemoData = internalMutation({
-  args: {},
-  handler: async (ctx) => {
-    assertDevMutationsAllowed();
-    const existing = await ctx.db
+/** Busca un usuario por email (uso interno del seed, para idempotencia). */
+export const buscarPorEmail = internalQuery({
+  args: { email: v.string() },
+  returns: v.union(v.id("users"), v.null()),
+  handler: async (ctx, args) => {
+    const u = await ctx.db
       .query("users")
-      .withIndex("by_email", (q) => q.eq("email", DEMO_USER_EMAIL))
-      .unique();
-    if (existing) {
-      return { skipped: true, reason: "El dataset demo ya existe" };
-    }
-
-    const marta = await ctx.db.insert("users", {
-      name: "Marta",
-      email: DEMO_USER_EMAIL,
-      rol: "propietaria",
-      isDemo: true,
-    });
-
-    const nombresClientes = [
-      { nombre: "Juan Pérez", estado: "activo" },
-      { nombre: "Ana Gómez", estado: "nuevo" },
-      { nombre: "Carlos Ruiz", estado: "activo" },
-      { nombre: "Lucía Fernández", estado: "en negociación" },
-      { nombre: "Martín Silva", estado: "activo" },
-      { nombre: "Sofía Torres", estado: "nuevo" },
-      { nombre: "Diego Molina", estado: "en negociación" },
-    ];
-
-    const clienteIds = [];
-    for (const c of nombresClientes) {
-      clienteIds.push(
-        await ctx.db.insert("clientes", {
-          nombre: c.nombre,
-          estado: c.estado,
-          isDemo: true,
-        }),
-      );
-    }
-
-    const ahora = Date.now();
-    const acciones = [
-      "Llamar para confirmar pedido",
-      "Enviar propuesta",
-      "Seguimiento post-venta",
-      "Coordinar reunión",
-      "Confirmar datos de facturación",
-    ];
-
-    const offsetsDias = [-3, -1, 0, 0, 1, 3, 7, -5, 0, 2, -2, 5];
-    for (let i = 0; i < offsetsDias.length; i++) {
-      const cliente = clienteIds[i % clienteIds.length];
-      await ctx.db.insert("seguimientos", {
-        clienteId: cliente,
-        accion: acciones[i % acciones.length],
-        vence: ahora + offsetsDias[i] * DIA_MS,
-        hecho: false,
-        responsableId: marta,
-        isDemo: true,
-      });
-    }
-
-    return { skipped: false, userId: marta, clientes: clienteIds.length };
+      .withIndex("email", (q) => q.eq("email", args.email))
+      .first();
+    return u === null ? null : u._id;
   },
 });
 
-// Mecanismo explícito para probar el gating de rol (ej. /equipo) sin login
-// real: cambia el rol del ÚNICO usuario que `users.getCurrent` puede ver.
-// No crea usuarios nuevos ni toca ningún otro campo.
-export const setDemoUserRole = internalMutation({
-  args: { rol: v.union(v.literal("propietaria"), v.literal("comercial")) },
-  handler: async (ctx, { rol }) => {
-    assertDevMutationsAllowed();
-    const marta = await ctx.db
-      .query("users")
-      .withIndex("by_email", (q) => q.eq("email", DEMO_USER_EMAIL))
-      .unique();
-    if (!marta) {
-      throw new Error(
-        "No existe el usuario demo todavía - correr seedDemoData primero",
-      );
+/**
+ * Seed dev-only de los usuarios del negocio. NO es invocable desde el cliente
+ * (internalAction). Idempotente por email. El `rol` solo se produce por este
+ * camino (createAccount con profile.rol → createOrUpdateUser lo acepta).
+ *
+ * Ejecutar en local:
+ *   npx convex run seed:sembrarUsuarios '{"martaPassword":"...","carlosPassword":"..."}'
+ */
+export const sembrarUsuarios = internalAction({
+  args: { martaPassword: v.string(), carlosPassword: v.string() },
+  returns: v.array(v.string()),
+  handler: async (ctx, args) => {
+    const cuentas = [
+      {
+        email: "marta@vibecrm.local",
+        name: "Marta López",
+        rol: "propietaria" as const,
+        password: args.martaPassword,
+      },
+      {
+        email: "carlos@vibecrm.local",
+        name: "Carlos Ruiz",
+        rol: "comercial" as const,
+        password: args.carlosPassword,
+      },
+    ];
+    const resultado: string[] = [];
+    for (const c of cuentas) {
+      const existente = await ctx.runQuery(internal.seed.buscarPorEmail, {
+        email: c.email,
+      });
+      if (existente !== null) {
+        resultado.push(`ya existe: ${c.email}`);
+        continue;
+      }
+      await createAccount<DataModel>(ctx, {
+        provider: "password",
+        account: { id: c.email, secret: c.password },
+        profile: { email: c.email, name: c.name, rol: c.rol },
+      });
+      resultado.push(`creado: ${c.email} (${c.rol})`);
     }
-    await ctx.db.patch(marta._id, { rol });
-    return { userId: marta._id, rol };
+    return resultado;
   },
 });

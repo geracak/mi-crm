@@ -1,30 +1,33 @@
+import { ShieldAlert } from "lucide-react";
 import { fetchQuery } from "convex/nextjs";
-import { api } from "../../../../convex/_generated/api";
-import { EmptyState } from "@/components/ui/empty-state";
-import { ShieldAlert, UserCog } from "lucide-react";
+import { convexAuthNextjsToken } from "@convex-dev/auth/nextjs/server";
+import { api } from "@/lib/convexApi";
+import { guardAuth } from "@/lib/authGuard";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { Proximamente } from "@/components/Proximamente";
 
-// Gating real, no solo visual: aunque la sidebar/TabBar oculten "Equipo"
-// para rol !== "propietaria", esta ruta valida el rol server-side en cada
-// render - navegar acá por URL directa con un usuario "comercial" nunca
-// muestra el contenido real. Autorización completa con sesión real: GER-217/GER-219.
+/**
+ * Gate REAL de autorización (no solo ocultar el tab): primero exige sesión
+ * (guardAuth → /login si no hay), luego comprueba el ROL server-side. Un usuario
+ * "comercial" que teclee /equipo ve "Acceso restringido". El CRUD llega en TAL-60.
+ */
 export default async function EquipoPage() {
-  const currentUser = await fetchQuery(api.users.getCurrent);
+  await guardAuth();
 
-  if (currentUser?.rol !== "propietaria") {
+  const token = await convexAuthNextjsToken();
+  const user = await fetchQuery(api.usuarios.actual, {}, { token });
+
+  if (user.rol !== "propietaria") {
     return (
-      <EmptyState
-        icon={<ShieldAlert size={24} strokeWidth={1.5} />}
-        title="Sin acceso"
-        help="Esta sección es solo para la dueña del negocio."
-      />
+      <div className="pt-8">
+        <EmptyState
+          icon={<ShieldAlert className="size-6" aria-hidden />}
+          title="Acceso restringido"
+          help="Solo la dueña puede gestionar el equipo."
+        />
+      </div>
     );
   }
 
-  return (
-    <EmptyState
-      icon={<UserCog size={24} strokeWidth={1.5} />}
-      title="Próximamente"
-      help="Gestión de usuarios y roles se construye en otro ticket (GER-219)."
-    />
-  );
+  return <Proximamente titulo="Gestión de usuarios y roles" />;
 }

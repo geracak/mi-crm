@@ -1,35 +1,30 @@
+import type { ReactNode } from "react";
+import { cn } from "@/lib/utils";
+
 interface MetricProps {
   label: string;
   value: string;
-  delta?: string;
-  deltaDirection?: "up" | "down";
+  /** Texto simple bajo la cifra (p. ej. "3 oportunidades"). */
+  sub?: string;
+  /** Pill de variación (p. ej. Badge con delta), si aplica. */
+  delta?: ReactNode;
+  valueClassName?: string;
 }
 
-export function Metric({ label, value, delta, deltaDirection }: MetricProps) {
-  let dir = deltaDirection;
-  if (!dir && delta) {
-    dir = delta.trim().startsWith("-") ? "down" : "up";
-  }
-  const isUp = dir !== "down";
-
+export function Metric({ label, value, sub, delta, valueClassName }: MetricProps) {
   return (
-    <div className="flex flex-col gap-2">
-      <span className="text-[13px] tracking-tight text-text-muted">{label}</span>
-      <div className="flex items-baseline gap-3">
-        <span className="font-mono text-[30px] leading-[1.1] font-medium tabular-nums text-text">
-          {value}
-        </span>
-        {delta && (
-          <span
-            className={
-              "inline-flex items-center gap-1 rounded-full px-2 py-[3px] font-mono text-xs font-medium tabular-nums " +
-              (isUp ? "bg-success-bg text-success-text" : "bg-error-bg text-error-text")
-            }
-          >
-            {isUp ? "▲" : "▼"} {delta.replace(/^[+-]/, "")}
-          </span>
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[13px] text-text-muted">{label}</span>
+      <span
+        className={cn(
+          "font-mono text-[28px] leading-tight font-medium tabular-nums text-text",
+          valueClassName,
         )}
-      </div>
+      >
+        {value}
+      </span>
+      {sub && <span className="text-xs text-text-subtle">{sub}</span>}
+      {delta}
     </div>
   );
 }

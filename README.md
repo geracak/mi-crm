@@ -1,38 +1,72 @@
 # Vibe CRM
 
-CRM responsive para pequeños negocios (Next.js 16 App Router + Convex + Tailwind CSS v4).
+CRM para un pequeño negocio de ventas digitales: organizar clientes y no perder ventas por falta de seguimiento.
 
-## Desarrollo local
+- **Stack:** Next.js 16 (App Router) + TypeScript + Tailwind CSS v4 + Convex (+ Convex Auth).
+- **Diseño:** ver [`design/design.md`](./design/design.md) (tokens) y [`design/design_handoff_crm_pwa/`](./design/design_handoff_crm_pwa) (prototipo y especificación pantalla por pantalla).
+- **Planificación:** equipo `Talent-academy` en Linear, proyectos **CRM-MVP** y **CRM-RESTOPRD**.
+
+## Empezar en local
 
 ```bash
 npm install
-npx convex dev    # deja esto corriendo en una terminal - watch de funciones/schema
-npm run dev       # en otra terminal
+npx convex dev      # backend: vincula/crea el deployment y genera .env.local
+npm run dev         # frontend: http://localhost:3000
 ```
 
-Variables de entorno locales (`.env.local`, ver `.env.local.example`):
+Hacen falta los dos procesos a la vez (Convex y Next). El primer `npx convex dev` pide login e inicializa el deployment; a partir de ahí `convex/_generated` y `.env.local` (con `NEXT_PUBLIC_CONVEX_URL`) quedan listos.
 
-- `NEXT_PUBLIC_CONVEX_URL` / `CONVEX_DEPLOYMENT` - las genera `npx convex dev` la primera vez.
-- `ALLOW_DEV_SEED` (variable de **deployment** de Convex, no de este archivo - se setea con `npx convex env set ALLOW_DEV_SEED true`) - habilita las mutations de datos de prueba en `convex/seed.ts`. **Nunca setear en el deployment de producción.**
+### Usuarios (seed dev)
 
-Para poblar datos de prueba en el deployment de dev:
+El registro público está cerrado a propósito. Los usuarios se crean con una función interna (dev-only):
 
 ```bash
-npx convex run seed:seedDemoData
+npx convex run seed:sembrarUsuarios '{"martaPassword":"<pass>","carlosPassword":"<pass>"}'
 ```
 
-## Deploy en Railway
+Crea `marta@vibecrm.local` (dueña) y `carlos@vibecrm.local` (comercial). Luego entra en `/login`.
 
-El build de este repo está configurado para desplegar las funciones de Convex a **producción** y buildear Next.js en un solo paso (`package.json` → `"build": "convex deploy --cmd-url-env-var-name NEXT_PUBLIC_CONVEX_URL --cmd \"next build\""`). Railway detecta el proyecto Node/Next.js automáticamente (Nixpacks); `railway.json` fija el comando de arranque.
+## Estructura
 
-**Configuración única requerida en Railway** (Settings → Variables del servicio):
+```
+convex/            Esquema, funciones y auth de Convex (_generated SÍ se versiona)
+design/            Design system y prototipo de referencia (no es código a portar)
+src/app/           Rutas (App Router). (app) = shell autenticado, (auth) = login
+src/proxy.ts       Proxy (antes «middleware») — redirección optimista de sesión
+src/components/    UI del design system, layout (sidebar/tabbar) y overlays
+src/lib/           Utilidades (fechas locales, api de Convex, guard de auth, nav)
+```
 
-- `CONVEX_DEPLOY_KEY` - deploy key del deployment de **producción** de Convex. Se genera desde el [dashboard de Convex](https://dashboard.convex.dev) → proyecto → Settings → Deploy Keys → Production. Con esta variable seteada, cada build de Railway ejecuta `convex deploy`, que sube schema/funciones a producción e inyecta automáticamente `NEXT_PUBLIC_CONVEX_URL` (no hace falta setearla a mano).
+## Seguridad / auth (resumen)
 
-No setear `ALLOW_DEV_SEED` en el deployment de producción de Convex - las mutations de `convex/seed.ts` son solo para desarrollo local (ver comentario en ese archivo).
+- **Convex Auth** con proveedor Password. La tabla `users` lleva `rol` (`propietaria` | `comercial`).
+- Defensa en capas: `src/proxy.ts` (redirección optimista) + `guardAuth()` server-side por página + `requireUsuario()` en cada función Convex (exige sesión y rol válido). El registro público no puede autoasignarse rol.
+- `/equipo` comprueba el rol server-side (solo la dueña).
 
-## Stack
+## Despliegue
 
-- Next.js 16 (App Router, Turbopack) + TypeScript estricto
-- Convex (backend/datos en tiempo real)
-- Tailwind CSS v4 (tokens de diseño en `src/app/globals.css`, portados desde `design/`)
+### Backend — Convex (se despliega aparte)
+
+```bash
+npx convex deploy            # despliega funciones + esquema al deployment de producción
+```
+
+En ese deployment de producción hay que dejar configurado **Convex Auth** una sola vez:
+
+```bash
+npx @convex-dev/auth --prod --web-server-url https://<tu-dominio-railway>
+```
+
+Esto fija `SITE_URL`, `JWT_PRIVATE_KEY` y `JWKS` en producción. `SITE_URL` debe ser el dominio público (el de Railway).
+
+### Frontend — Railway (publicación automática desde GitHub)
+
+Railway construye con Nixpacks (`railway.json`): `npm run build` → `npm run start` (Next.js respeta la variable `PORT`). En **Variables** de Railway define:
+
+| Variable | Valor |
+| --- | --- |
+| `NEXT_PUBLIC_CONVEX_URL` | URL del deployment de Convex de producción (`https://<algo>.convex.cloud`) |
+
+Con GitHub conectado, cada push a `main` dispara build + deploy. `convex/_generated` está versionado, así que `npm run build` es reproducible sin credenciales de Convex.
+
+> **Nota:** con esta configuración el backend Convex NO se despliega desde Railway; actualízalo con `npx convex deploy` cuando cambien las funciones o el esquema.

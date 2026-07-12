@@ -8,11 +8,16 @@
  * @module
  */
 
+import type * as auth from "../auth.js";
+import type * as authz from "../authz.js";
 import type * as clientes from "../clientes.js";
-import type * as dateBounds from "../dateBounds.js";
+import type * as fechas from "../fechas.js";
+import type * as http from "../http.js";
+import type * as interacciones from "../interacciones.js";
 import type * as seed from "../seed.js";
 import type * as seguimientos from "../seguimientos.js";
-import type * as users from "../users.js";
+import type * as usuarios from "../usuarios.js";
+import type * as ventas from "../ventas.js";
 
 import type {
   ApiFromModules,
@@ -21,11 +26,16 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  auth: typeof auth;
+  authz: typeof authz;
   clientes: typeof clientes;
-  dateBounds: typeof dateBounds;
+  fechas: typeof fechas;
+  http: typeof http;
+  interacciones: typeof interacciones;
   seed: typeof seed;
   seguimientos: typeof seguimientos;
-  users: typeof users;
+  usuarios: typeof usuarios;
+  ventas: typeof ventas;
 }>;
 
 /**

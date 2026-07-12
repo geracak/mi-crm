@@ -1,47 +1,36 @@
-import { cn } from "@/lib/cn";
+import { cn } from "@/lib/utils";
+import { initials } from "@/lib/utils";
 
 interface AvatarProps {
-  name?: string;
-  initials?: string;
-  size?: number;
+  name: string;
   variant?: "primary" | "neutral";
+  size?: number;
   className?: string;
 }
 
 export function Avatar({
-  name = "",
-  initials,
-  size = 40,
+  name,
   variant = "primary",
+  size = 40,
   className,
 }: AvatarProps) {
-  const text =
-    initials ||
-    name
-      .split(" ")
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((w) => w[0])
-      .join("")
-      .toUpperCase();
-
   return (
     <span
-      aria-label={name || undefined}
       className={cn(
-        "inline-flex shrink-0 items-center justify-center rounded-full font-semibold tracking-tight",
-        variant === "neutral"
-          ? "bg-surface-2 text-text-muted"
-          : "bg-primary-subtle text-primary",
+        "inline-flex shrink-0 items-center justify-center rounded-full font-semibold",
+        variant === "primary"
+          ? "bg-primary-subtle text-primary"
+          : "bg-surface-2 text-text-muted",
         className,
       )}
       style={{
         width: size,
         height: size,
-        fontSize: Math.round(size * 0.35),
+        fontSize: Math.max(11, Math.round(size * 0.35)),
       }}
+      aria-hidden
     >
-      {text}
+      {initials(name)}
     </span>
   );
 }

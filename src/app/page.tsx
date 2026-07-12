@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
-export default function Home() {
+// La app abre siempre en "Hoy" (Tareas del día) — ver PRD/TAL-16.
+export default function RootPage() {
   redirect("/hoy");
 }
