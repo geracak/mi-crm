@@ -37,10 +37,13 @@ yarn-error.log*
 # vercel
 .vercel
 
-# convex - regenerated on every `npx convex dev` / `npx convex deploy`
-# (the build script runs `convex deploy` before `next build`, so this is
-# always fresh in CI/Railway too - never commit a possibly-stale copy).
-/convex/_generated/
+# convex/_generated is intentionally COMMITTED, not ignored here: in
+# `convex deploy --cmd "next build"`, the wrapped build command runs before
+# codegen/push finish, so a fresh Railway clone has no convex/_generated at
+# all when `next build` resolves its imports (confirmed via a real failed
+# Railway build - "Module not found: .../convex/_generated/api"). It's
+# regenerated locally by `npx convex dev` and re-committed like any other
+# generated-but-required build input (e.g. package-lock.json).
 
 # claude code local settings
 **/.claude/settings.local.json
