@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 import { internalAction, internalQuery } from "./_generated/server";
-import { createAccount } from "@convex-dev/auth/server";
+import { createAccount, modifyAccountCredentials } from "@convex-dev/auth/server";
 import { internal } from "./_generated/api";
 import type { DataModel } from "./_generated/dataModel";
 
@@ -58,6 +58,55 @@ export const sembrarUsuarios = internalAction({
         profile: { email: c.email, name: c.name, rol: c.rol },
       });
       resultado.push(`creado: ${c.email} (${c.rol})`);
+    }
+    return resultado;
+  },
+});
+
+/**
+ * Dev-only: fija la contraseña de los dos usuarios del negocio a la indicada.
+ * Si el usuario ya existe, resetea su credencial (modifyAccountCredentials);
+ * si no existe, lo crea con su rol (createAccount). Idempotente y re-ejecutable.
+ * NO invocable desde el cliente (internalAction).
+ *
+ * Ejecutar en local:
+ *   npx convex run seed:resetearPasswords '{"password":"..."}'
+ */
+export const resetearPasswords = internalAction({
+  args: { password: v.string() },
+  returns: v.array(v.string()),
+  handler: async (ctx, args) => {
+    const cuentas = [
+      {
+        email: "marta@vibecrm.local",
+        name: "Marta López",
+        rol: "propietaria" as const,
+      },
+      {
+        email: "carlos@vibecrm.local",
+        name: "Carlos Ruiz",
+        rol: "comercial" as const,
+      },
+    ];
+    const resultado: string[] = [];
+    for (const c of cuentas) {
+      const existente = await ctx.runQuery(internal.seed.buscarPorEmail, {
+        email: c.email,
+      });
+      if (existente !== null) {
+        await modifyAccountCredentials<DataModel>(ctx, {
+          provider: "password",
+          account: { id: c.email, secret: args.password },
+        });
+        resultado.push(`password reseteada: ${c.email}`);
+      } else {
+        await createAccount<DataModel>(ctx, {
+          provider: "password",
+          account: { id: c.email, secret: args.password },
+          profile: { email: c.email, name: c.name, rol: c.rol },
+        });
+        resultado.push(`creado: ${c.email} (${c.rol})`);
+      }
     }
     return resultado;
   },
