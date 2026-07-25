@@ -4,6 +4,12 @@ import { createAccount, modifyAccountCredentials } from "@convex-dev/auth/server
 import { internal } from "./_generated/api";
 import type { DataModel } from "./_generated/dataModel";
 
+// ⚠️ GER-238: no volver a correr `sembrarUsuarios` ni `resetearPasswords` contra
+// producción sin revisar antes el riesgo de duplicado — ambas buscan a Marta y
+// Carlos por email hardcodeado (`marta@vibecrm.local`/`carlos@vibecrm.local`),
+// que puede no coincidir con `users.email` si esa cuenta cambió de email tras
+// vincularse con Google (decisión Diferida, ver la issue).
+
 /** Busca un usuario por email (uso interno del seed, para idempotencia). */
 export const buscarPorEmail = internalQuery({
   args: { email: v.string() },

@@ -9,8 +9,10 @@
  */
 
 import type * as auth from "../auth.js";
+import type * as authMaintenance from "../authMaintenance.js";
 import type * as authz from "../authz.js";
 import type * as clientes from "../clientes.js";
+import type * as crons from "../crons.js";
 import type * as fechas from "../fechas.js";
 import type * as http from "../http.js";
 import type * as interacciones from "../interacciones.js";
@@ -27,8 +29,10 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  authMaintenance: typeof authMaintenance;
   authz: typeof authz;
   clientes: typeof clientes;
+  crons: typeof crons;
   fechas: typeof fechas;
   http: typeof http;
   interacciones: typeof interacciones;
