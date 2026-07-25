@@ -1,8 +1,14 @@
-import { v } from "convex/values";
-import { internalAction, internalQuery } from "./_generated/server";
+import { v, ConvexError } from "convex/values";
+import { internalAction, internalMutation, internalQuery } from "./_generated/server";
 import { createAccount, modifyAccountCredentials } from "@convex-dev/auth/server";
 import { internal } from "./_generated/api";
 import type { DataModel } from "./_generated/dataModel";
+
+// ⚠️ GER-238: no volver a correr `sembrarUsuarios` ni `resetearPasswords` contra
+// producción sin revisar antes el riesgo de duplicado — ambas buscan a Marta y
+// Carlos por email hardcodeado (`marta@vibecrm.local`/`carlos@vibecrm.local`),
+// que puede no coincidir con `users.email` si esa cuenta cambió de email tras
+// vincularse con Google (decisión Diferida, ver la issue).
 
 /** Busca un usuario por email (uso interno del seed, para idempotencia). */
 export const buscarPorEmail = internalQuery({
@@ -109,5 +115,42 @@ export const resetearPasswords = internalAction({
       }
     }
     return resultado;
+  },
+});
+
+/**
+ * GER-238 — parche de datos PUNTUAL, se retira de este archivo en un commit
+ * separado apenas se confirme que corrió bien. Reasigna el email de un
+ * usuario YA provisionado (no crea, no borra). Uso único: vincular a Marta
+ * (propietaria) con el Gmail personal de Gerardo para poder probar el login
+ * con Google de punta a punta. No toca `authAccounts`: el login por
+ * contraseña sigue funcionando con el email original, porque
+ * `@convex-dev/auth` busca la cuenta password por
+ * `authAccounts.providerAccountId`, no por `users.email`.
+ *
+ * Ejecutar (contra producción, por decisión explícita — ver GER-238):
+ *   npx convex run seed:actualizarEmailUsuario \
+ *     '{"emailActual":"marta@vibecrm.local","emailNuevo":"gera.cak@gmail.com"}' --prod
+ */
+export const actualizarEmailUsuario = internalMutation({
+  args: { emailActual: v.string(), emailNuevo: v.string() },
+  returns: v.string(),
+  handler: async (ctx, args) => {
+    const usuario = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", args.emailActual))
+      .unique();
+    if (usuario === null) {
+      throw new ConvexError(`No existe usuario con email ${args.emailActual}`);
+    }
+    const colision = await ctx.db
+      .query("users")
+      .withIndex("email", (q) => q.eq("email", args.emailNuevo))
+      .unique();
+    if (colision !== null && colision._id !== usuario._id) {
+      throw new ConvexError(`Ya hay otro usuario con email ${args.emailNuevo}`);
+    }
+    await ctx.db.patch(usuario._id, { email: args.emailNuevo });
+    return `email actualizado: ${args.emailActual} -> ${args.emailNuevo} (rol ${usuario.rol})`;
   },
 });

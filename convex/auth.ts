@@ -1,7 +1,9 @@
 import { convexAuth } from "@convex-dev/auth/server";
 import { Password } from "@convex-dev/auth/providers/Password";
+import Google from "@auth/core/providers/google";
 import { ConvexError } from "convex/values";
 import type { DataModel } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [
@@ -16,21 +18,81 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         };
       },
     }),
+    Google({
+      // Mapeo explícito: nos interesa `email_verified` para decidir el linking
+      // en createOrUpdateUser (nunca vincular con un email que Google no verificó).
+      profile(googleProfile) {
+        return {
+          id: googleProfile.sub,
+          email: googleProfile.email,
+          name: googleProfile.name,
+          image: googleProfile.picture,
+          emailVerified: googleProfile.email_verified,
+        };
+      },
+    }),
   ],
   callbacks: {
     // Regla de aprovisionamiento (no "rechazar toda creación", que bloquearía el
     // propio seed): se crea un usuario nuevo SOLO si el profile trae un rol
     // válido, y ese rol solo lo produce el seed interno vía createAccount.
-    //
-    // Nota: con el proveedor Password, el sign-in normal NO pasa por este
-    // callback (solo se invoca al CREAR cuenta: signUp público o createAccount).
-    // Por eso el branch `existingUserId` casi nunca se ejerce con Password; se
-    // mantiene por corrección (account linking).
-    async createOrUpdateUser(ctx, args) {
+    // Google NUNCA crea usuarios: solo puede VINCULARSE a uno ya provisionado
+    // (registro cerrado por diseño — GER-238).
+    async createOrUpdateUser(ctxLoose, args) {
+      // `ctxLoose.db` viene tipado contra `AnyDataModel` (firma genérica de la
+      // librería) y no conoce nuestro índice `email`; casteamos al `MutationCtx`
+      // generado para este proyecto, que sí lo tiene.
+      const ctx = ctxLoose as unknown as MutationCtx;
+
+      // Revalida el rol SIEMPRE, incluso en la ruta ya vinculada: una cuenta
+      // desprovisionada (rol removido después de vincularse) no debe poder
+      // re-autenticar solo porque su authAccount ya existía de antes.
       if (args.existingUserId !== null) {
+        const usuario = await ctx.db.get(args.existingUserId);
+        if (
+          usuario === null ||
+          (usuario.rol !== "propietaria" && usuario.rol !== "comercial")
+        ) {
+          throw new ConvexError(
+            "Esta cuenta ya no tiene acceso. Contactá a la persona dueña del CRM.",
+          );
+        }
         return args.existingUserId;
       }
-      const profile = args.profile as Record<string, unknown>;
+
+      const profile = args.profile as Record<string, unknown> & {
+        email?: string;
+        emailVerified?: boolean;
+      };
+
+      if (args.provider.id === "google") {
+        const email =
+          typeof profile.email === "string" ? profile.email : undefined;
+        // Google no verificó el email → nunca vincular (evita takeover de cuenta).
+        if (!email || profile.emailVerified !== true) {
+          throw new ConvexError(
+            "Esta cuenta de Google no tiene acceso. Contactá a la persona dueña del CRM.",
+          );
+        }
+        // Mismo patrón que `uniqueUserWithVerifiedEmail` de la librería
+        // (@convex-dev/auth/dist/server/implementation/users.js): 0 o >1
+        // coincidencias se tratan igual (rechazo neutro), nunca se elige al azar.
+        const candidatos = await ctx.db
+          .query("users")
+          .withIndex("email", (q) => q.eq("email", email))
+          .take(2);
+        const existente = candidatos.length === 1 ? candidatos[0] : null;
+        if (
+          existente === null ||
+          (existente.rol !== "propietaria" && existente.rol !== "comercial")
+        ) {
+          throw new ConvexError(
+            "Esta cuenta de Google no tiene acceso. Contactá a la persona dueña del CRM.",
+          );
+        }
+        return existente._id; // vincula, no crea
+      }
+
       const rol = profile.rol;
       if (rol !== "propietaria" && rol !== "comercial") {
         throw new ConvexError("Registro no permitido");
