@@ -1,7 +1,43 @@
-import { action } from "./_generated/server";
-import { api } from "./_generated/api";
+import { action, internalMutation } from "./_generated/server";
+import { api, internal } from "./_generated/api";
 import { v } from "convex/values";
 import { normalizarEmail, ENVIO_FALLIDO } from "./emailUtils";
+
+/** Ventana del límite de solicitudes: como mucho una cada 60 segundos por correo. */
+const VENTANA_THROTTLE_MS = 60 * 1000;
+
+/**
+ * GER-239 — Comprueba y registra en una sola transacción si toca dejar pasar
+ * una solicitud de código, o si hay que frenarla por venir demasiado seguido.
+ *
+ * Indexa por el correo TAL CUAL se pidió, exista o no la cuenta: así el propio
+ * límite no se convierte en un oráculo de qué correos tienen acceso (un correo
+ * inexistente se frena exactamente igual que uno real).
+ */
+export const intentarRegistrarSolicitud = internalMutation({
+  args: { email: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const ahora = Date.now();
+    const fila = await ctx.db
+      .query("recuperacionThrottle")
+      .withIndex("by_email", (q) => q.eq("email", args.email))
+      .unique();
+
+    if (fila === null) {
+      await ctx.db.insert("recuperacionThrottle", {
+        email: args.email,
+        ultimaSolicitud: ahora,
+      });
+      return true;
+    }
+    if (ahora - fila.ultimaSolicitud < VENTANA_THROTTLE_MS) {
+      return false;
+    }
+    await ctx.db.patch(fila._id, { ultimaSolicitud: ahora });
+    return true;
+  },
+});
 
 /**
  * GER-239 — Solicitud del código de recuperación.
@@ -21,13 +57,28 @@ import { normalizarEmail, ENVIO_FALLIDO } from "./emailUtils";
  * Efecto secundario buscado: los dos resultados posibles son indistinguibles
  * para un correo que no existe, así que esta función no sirve de oráculo de qué
  * correos tienen cuenta. (Ojo: `auth:signIn` sigue siendo pública y por ahí la
- * enumeración sigue abierta — es el riesgo ya declarado en la issue.)
+ * enumeración sigue abierta — riesgo declarado y aceptado en la issue.)
+ *
+ * ⚠️ Riesgo de envío masivo (declarado en la issue): mitigado acá con
+ * `intentarRegistrarSolicitud`. Si la solicitud viene demasiado seguida, se
+ * responde "enviado" igual (misma razón que arriba: no delatar nada) pero se
+ * corta ANTES de llamar a `signIn`, así que no se dispara ningún correo real
+ * ni se invalida el código válido que ya estuviera pendiente.
  */
 export const solicitarCodigo = action({
   args: { email: v.string() },
   returns: v.union(v.literal("enviado"), v.literal("fallo_envio")),
   handler: async (ctx, args): Promise<"enviado" | "fallo_envio"> => {
     const email = normalizarEmail(args.email);
+
+    const permitido = await ctx.runMutation(
+      internal.recuperacion.intentarRegistrarSolicitud,
+      { email },
+    );
+    if (!permitido) {
+      return "enviado";
+    }
+
     try {
       await ctx.runAction(api.auth.signIn, {
         provider: "password",
