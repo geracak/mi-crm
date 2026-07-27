@@ -4,16 +4,27 @@ import Google from "@auth/core/providers/google";
 import { ConvexError } from "convex/values";
 import type { DataModel } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
+import { ResendOTP } from "./ResendOTP";
+import { normalizarEmail } from "./emailUtils";
 
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
   providers: [
     Password<DataModel>({
+      // GER-239: proveedor del código de un solo uso para el flujo `reset`.
+      // Habilita signIn("password", { flow: "reset" | "reset-verification" }).
+      reset: ResendOTP,
       // Perfil PÚBLICO del signUp: solo email/name, NUNCA rol. Así una llamada
       // maliciosa a signIn("password", { flow: "signUp" }) no puede autoasignarse
       // un rol; el único profile con rol lo produce el seed (createAccount).
+      //
+      // GER-239: `profile` corre en TODOS los flujos (signUp, signIn, reset,
+      // reset-verification), así que normalizar aquí es lo que hace que
+      // `retrieveAccount` encuentre la cuenta sin importar cómo se teclee el
+      // correo. NO basta por sí solo: la verificación posterior compara los
+      // params ORIGINALES, y de eso se ocupa el `authorize` de ResendOTP.
       profile(params) {
         return {
-          email: params.email as string,
+          email: normalizarEmail(params.email as string),
           name: (params.name as string | undefined) || undefined,
         };
       },

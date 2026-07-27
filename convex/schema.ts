@@ -114,4 +114,15 @@ export default defineSchema({
     // `estadoDe`. No hay `by_estado`: /ventas necesita los cuatro contadores a
     // la vez, así que lee la tabla entera una vez y filtra en memoria.
   }).index("by_cliente_fecha", ["clienteId", "fecha"]),
+
+  // GER-239 — Límite de solicitudes de código de recuperación, aparte del
+  // límite de INTENTOS de verificación que ya trae `@convex-dev/auth`
+  // (`authRateLimits`, 10/hora). Sin esto, nada impedía pedir códigos nuevos
+  // en bucle: cada solicitud dispara un correo real por Resend. Se indexa por
+  // el correo TECLEADO (normalizado), exista o no la cuenta — así el límite en
+  // sí no delata qué correos tienen acceso.
+  recuperacionThrottle: defineTable({
+    email: v.string(),
+    ultimaSolicitud: v.number(),
+  }).index("by_email", ["email"]),
 });

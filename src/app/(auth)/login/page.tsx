@@ -3,12 +3,28 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthActions } from "@convex-dev/auth/react";
-import { useConvexAuth } from "convex/react";
-import { AlertCircle, Eye, EyeOff } from "lucide-react";
+import { useAction, useConvexAuth } from "convex/react";
+import { AlertCircle, ArrowLeft, Eye, EyeOff, MailCheck } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { api } from "@/lib/convexApi";
+// Módulo PURO de convex/ (sin imports de servidor): es seguro traerlo al
+// bundle del navegador. Ver la cabecera de convex/emailUtils.ts.
+import { normalizarEmail } from "../../../../convex/emailUtils";
 
 const GOOGLE_INTENTO_KEY = "vibecrm:googleIntento";
+
+/**
+ * GER-239 — Mensaje deliberadamente ambiguo: se muestra IGUAL exista o no la
+ * cuenta. Decir "ese correo no está registrado" convertiría el login en un
+ * oráculo de qué correos tienen acceso al CRM.
+ */
+const MENSAJE_NEUTRO =
+  "Si el correo corresponde a una cuenta con acceso, te enviamos un código. Revisá tu bandeja y también el spam.";
+
+const MIN_PASSWORD = 8;
+
+type Paso = "login" | "pedir-codigo" | "verificar";
 
 function GoogleIcon() {
   return (
@@ -35,12 +51,25 @@ function GoogleIcon() {
 
 export default function LoginPage() {
   const { signIn } = useAuthActions();
+  const solicitarCodigo = useAction(api.recuperacion.solicitarCodigo);
   const { isAuthenticated, isLoading } = useConvexAuth();
   const router = useRouter();
   const [showPass, setShowPass] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [googleSubmitting, setGoogleSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [paso, setPaso] = useState<Paso>("login");
+  const [aviso, setAviso] = useState<string | null>(null);
+  // El correo del paso 2 se reutiliza en el 3: la librería exige que coincida
+  // con el del `signIn` inicial (authorize de convex/ResendOTP.ts).
+  const [emailReset, setEmailReset] = useState("");
+
+  function irA(destino: Paso) {
+    setError(null);
+    setAviso(null);
+    setShowPass(false);
+    setPaso(destino);
+  }
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -48,12 +77,86 @@ export default function LoginPage() {
     const form = new FormData(e.currentTarget);
     // Solo iniciamos sesión: nunca exponemos el flujo de registro en la UI.
     form.set("flow", "signIn");
+    form.set("email", normalizarEmail(String(form.get("email") ?? "")));
     setSubmitting(true);
     try {
       await signIn("password", form);
       router.replace("/hoy");
     } catch {
       setError("Correo o contraseña incorrectos.");
+      setSubmitting(false);
+    }
+  }
+
+  async function onPedirCodigo(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setError(null);
+    const form = new FormData(e.currentTarget);
+    const email = normalizarEmail(String(form.get("email") ?? ""));
+    setSubmitting(true);
+    // Se llama a nuestra acción, NO a `signIn` directamente, porque devuelve un
+    // VALOR en vez de lanzar: la marca del fallo de envío no sobrevive el viaje
+    // al navegador dentro de un error. El detalle, en convex/recuperacion.ts.
+    //
+    // Un fallo real de envío SÍ se muestra: callarlo diría que mandamos un
+    // código que nunca salió. El correo inexistente, en cambio, devuelve
+    // "enviado" desde el servidor a propósito, para no revelar qué correos
+    // tienen acceso.
+    let resultado: "enviado" | "fallo_envio";
+    try {
+      resultado = await solicitarCodigo({ email });
+    } catch {
+      // Solo se llega acá si la acción ni siquiera pudo ejecutarse (por ejemplo
+      // sin red en el navegador): tampoco se envió nada.
+      resultado = "fallo_envio";
+    }
+    if (resultado === "fallo_envio") {
+      setError("No pudimos enviar el correo. Probá de nuevo en unos minutos.");
+      setSubmitting(false);
+      return;
+    }
+    setEmailReset(email);
+    setPaso("verificar");
+    setAviso(MENSAJE_NEUTRO);
+    setSubmitting(false);
+  }
+
+  async function onVerificar(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setError(null);
+    const form = new FormData(e.currentTarget);
+    const code = String(form.get("code") ?? "").trim();
+    const newPassword = String(form.get("newPassword") ?? "");
+    const repetir = String(form.get("repetir") ?? "");
+
+    // Se valida antes de llamar: el código se consume (y se borra) en el
+    // servidor al primer intento, así que un error evitable costaría pedir uno
+    // nuevo.
+    //
+    // Estas comprobaciones viven en JS a propósito, sin `minLength` en el
+    // input: el atributo hace que el navegador bloquee el envío antes y muestre
+    // su propio aviso, que va en el idioma del navegador (en inglés para la
+    // mayoría) y sin los estilos de la app.
+    if (newPassword.length < MIN_PASSWORD) {
+      setError(`La contraseña debe tener al menos ${MIN_PASSWORD} caracteres.`);
+      return;
+    }
+    if (newPassword !== repetir) {
+      setError("Las contraseñas no coinciden.");
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      await signIn("password", {
+        email: emailReset,
+        code,
+        newPassword,
+        flow: "reset-verification",
+      });
+      router.replace("/hoy");
+    } catch {
+      setError("Código incorrecto o vencido. Pedí uno nuevo si hace falta.");
       setSubmitting(false);
     }
   }
@@ -89,6 +192,16 @@ export default function LoginPage() {
     });
   }, [isAuthenticated, isLoading, router]);
 
+  const bloqueError = error && (
+    <div
+      role="alert"
+      className="flex items-center gap-2 rounded-md border border-error bg-error-bg px-3 py-2.5 text-[13px] text-error-text"
+    >
+      <AlertCircle className="size-4 shrink-0" aria-hidden />
+      {error}
+    </div>
+  );
+
   return (
     <main className="flex min-h-dvh items-center justify-center bg-bg px-4">
       <div className="w-full max-w-[400px]">
@@ -100,88 +213,217 @@ export default function LoginPage() {
         </div>
 
         <div className="rounded-xl border border-border bg-surface p-6 shadow-sm">
-          <h1 className="text-xl font-semibold text-text">Inicia sesión</h1>
-          <p className="mt-1 text-sm text-text-muted">
-            Entra para ver tus tareas del día.
-          </p>
+          {paso === "login" && (
+            <>
+              <h1 className="text-xl font-semibold text-text">Inicia sesión</h1>
+              <p className="mt-1 text-sm text-text-muted">
+                Entra para ver tus tareas del día.
+              </p>
 
-          <form onSubmit={onSubmit} className="mt-5 flex flex-col gap-4">
-            {error && (
-              <div
-                role="alert"
-                className="flex items-center gap-2 rounded-md border border-error bg-error-bg px-3 py-2.5 text-[13px] text-error-text"
-              >
-                <AlertCircle className="size-4 shrink-0" aria-hidden />
-                {error}
+              <form onSubmit={onSubmit} className="mt-5 flex flex-col gap-4">
+                {bloqueError}
+
+                <Input
+                  label="Correo"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  autoFocus
+                  required
+                  placeholder="tu@correo.com"
+                />
+
+                <div className="relative">
+                  <Input
+                    label="Contraseña"
+                    name="password"
+                    type={showPass ? "text" : "password"}
+                    autoComplete="current-password"
+                    required
+                    placeholder="••••••••"
+                    className="pr-11"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPass((v) => !v)}
+                    aria-label={
+                      showPass ? "Ocultar contraseña" : "Mostrar contraseña"
+                    }
+                    aria-pressed={showPass}
+                    className="absolute right-2 top-[34px] flex size-9 items-center justify-center rounded-md text-text-subtle hover:bg-surface-2"
+                  >
+                    {showPass ? (
+                      <EyeOff className="size-[18px]" aria-hidden />
+                    ) : (
+                      <Eye className="size-[18px]" aria-hidden />
+                    )}
+                  </button>
+                </div>
+
+                <Button type="submit" loading={submitting} className="w-full">
+                  Entrar
+                </Button>
+
+                <button
+                  type="button"
+                  onClick={() => irA("pedir-codigo")}
+                  className="text-center text-[13px] text-text-muted hover:text-text"
+                >
+                  ¿Olvidaste tu contraseña?
+                </button>
+              </form>
+
+              <div className="my-4 flex items-center gap-3" aria-hidden>
+                <div className="h-px flex-1 bg-border" />
+                <span className="text-[13px] text-text-muted">o</span>
+                <div className="h-px flex-1 bg-border" />
               </div>
-            )}
 
-            <Input
-              label="Correo"
-              name="email"
-              type="email"
-              autoComplete="email"
-              autoFocus
-              required
-              placeholder="tu@correo.com"
-            />
-
-            <div className="relative">
-              <Input
-                label="Contraseña"
-                name="password"
-                type={showPass ? "text" : "password"}
-                autoComplete="current-password"
-                required
-                placeholder="••••••••"
-                className="pr-11"
-              />
-              <button
+              <Button
                 type="button"
-                onClick={() => setShowPass((v) => !v)}
-                aria-label={showPass ? "Ocultar contraseña" : "Mostrar contraseña"}
-                aria-pressed={showPass}
-                className="absolute right-2 top-[34px] flex size-9 items-center justify-center rounded-md text-text-subtle hover:bg-surface-2"
+                variant="secondary"
+                className="w-full"
+                loading={googleSubmitting}
+                iconLeft={<GoogleIcon />}
+                onClick={onGoogleClick}
               >
-                {showPass ? (
-                  <EyeOff className="size-[18px]" aria-hidden />
-                ) : (
-                  <Eye className="size-[18px]" aria-hidden />
+                Continuar con Google
+              </Button>
+            </>
+          )}
+
+          {paso === "pedir-codigo" && (
+            <>
+              <h1 className="text-xl font-semibold text-text">
+                Recuperar contraseña
+              </h1>
+              <p className="mt-1 text-sm text-text-muted">
+                Escribí tu correo y te enviamos un código para crear una
+                contraseña nueva.
+              </p>
+
+              <form
+                onSubmit={onPedirCodigo}
+                className="mt-5 flex flex-col gap-4"
+              >
+                {bloqueError}
+
+                <Input
+                  label="Correo"
+                  name="email"
+                  type="email"
+                  autoComplete="email"
+                  autoFocus
+                  required
+                  placeholder="tu@correo.com"
+                />
+
+                <Button type="submit" loading={submitting} className="w-full">
+                  Enviar código
+                </Button>
+
+                <button
+                  type="button"
+                  onClick={() => irA("login")}
+                  className="flex items-center justify-center gap-1.5 text-[13px] text-text-muted hover:text-text"
+                >
+                  <ArrowLeft className="size-4" aria-hidden />
+                  Volver a iniciar sesión
+                </button>
+              </form>
+            </>
+          )}
+
+          {paso === "verificar" && (
+            <>
+              <h1 className="text-xl font-semibold text-text">
+                Escribí el código
+              </h1>
+              <p className="mt-1 text-sm text-text-muted">
+                Te lo enviamos a <span className="text-text">{emailReset}</span>.
+                Vence en 15 minutos.
+              </p>
+
+              <form onSubmit={onVerificar} className="mt-5 flex flex-col gap-4">
+                {aviso && (
+                  <div
+                    role="status"
+                    className="flex items-start gap-2 rounded-md border border-border bg-surface-2 px-3 py-2.5 text-[13px] text-text-muted"
+                  >
+                    <MailCheck
+                      className="mt-0.5 size-4 shrink-0"
+                      aria-hidden
+                    />
+                    {aviso}
+                  </div>
                 )}
-              </button>
-            </div>
 
-            <Button type="submit" loading={submitting} className="w-full">
-              Entrar
-            </Button>
+                {bloqueError}
 
-            <button
-              type="button"
-              onClick={() =>
-                setError("La recuperación de contraseña llegará pronto.")
-              }
-              className="text-center text-[13px] text-text-muted hover:text-text"
-            >
-              ¿Olvidaste tu contraseña?
-            </button>
-          </form>
+                <Input
+                  label="Código"
+                  name="code"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={8}
+                  autoFocus
+                  required
+                  placeholder="12345678"
+                />
 
-          <div className="my-4 flex items-center gap-3" aria-hidden>
-            <div className="h-px flex-1 bg-border" />
-            <span className="text-[13px] text-text-muted">o</span>
-            <div className="h-px flex-1 bg-border" />
-          </div>
+                <div className="relative">
+                  <Input
+                    label="Contraseña nueva"
+                    name="newPassword"
+                    type={showPass ? "text" : "password"}
+                    autoComplete="new-password"
+                    required
+                    placeholder="••••••••"
+                    className="pr-11"
+                    helper={`Mínimo ${MIN_PASSWORD} caracteres.`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPass((v) => !v)}
+                    aria-label={
+                      showPass ? "Ocultar contraseña" : "Mostrar contraseña"
+                    }
+                    aria-pressed={showPass}
+                    className="absolute right-2 top-[34px] flex size-9 items-center justify-center rounded-md text-text-subtle hover:bg-surface-2"
+                  >
+                    {showPass ? (
+                      <EyeOff className="size-[18px]" aria-hidden />
+                    ) : (
+                      <Eye className="size-[18px]" aria-hidden />
+                    )}
+                  </button>
+                </div>
 
-          <Button
-            type="button"
-            variant="secondary"
-            className="w-full"
-            loading={googleSubmitting}
-            iconLeft={<GoogleIcon />}
-            onClick={onGoogleClick}
-          >
-            Continuar con Google
-          </Button>
+                <Input
+                  label="Repetir contraseña"
+                  name="repetir"
+                  type={showPass ? "text" : "password"}
+                  autoComplete="new-password"
+                  required
+                  placeholder="••••••••"
+                />
+
+                <Button type="submit" loading={submitting} className="w-full">
+                  Cambiar contraseña y entrar
+                </Button>
+
+                <button
+                  type="button"
+                  onClick={() => irA("pedir-codigo")}
+                  className="flex items-center justify-center gap-1.5 text-[13px] text-text-muted hover:text-text"
+                >
+                  <ArrowLeft className="size-4" aria-hidden />
+                  Usar otro correo o pedir un código nuevo
+                </button>
+              </form>
+            </>
+          )}
         </div>
       </div>
     </main>
