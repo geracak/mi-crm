@@ -18,6 +18,7 @@ import type * as emailUtils from "../emailUtils.js";
 import type * as fechas from "../fechas.js";
 import type * as http from "../http.js";
 import type * as interacciones from "../interacciones.js";
+import type * as recuperacion from "../recuperacion.js";
 import type * as seed from "../seed.js";
 import type * as seguimientos from "../seguimientos.js";
 import type * as usuarios from "../usuarios.js";
@@ -40,6 +41,7 @@ declare const fullApi: ApiFromModules<{
   fechas: typeof fechas;
   http: typeof http;
   interacciones: typeof interacciones;
+  recuperacion: typeof recuperacion;
   seed: typeof seed;
   seguimientos: typeof seguimientos;
   usuarios: typeof usuarios;

@@ -3,14 +3,14 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthActions } from "@convex-dev/auth/react";
-import { useConvexAuth } from "convex/react";
-import { ConvexError } from "convex/values";
+import { useAction, useConvexAuth } from "convex/react";
 import { AlertCircle, ArrowLeft, Eye, EyeOff, MailCheck } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { api } from "@/lib/convexApi";
 // Módulo PURO de convex/ (sin imports de servidor): es seguro traerlo al
 // bundle del navegador. Ver la cabecera de convex/emailUtils.ts.
-import { normalizarEmail, ENVIO_FALLIDO } from "../../../../convex/emailUtils";
+import { normalizarEmail } from "../../../../convex/emailUtils";
 
 const GOOGLE_INTENTO_KEY = "vibecrm:googleIntento";
 
@@ -25,15 +25,6 @@ const MENSAJE_NEUTRO =
 const MIN_PASSWORD = 8;
 
 type Paso = "login" | "pedir-codigo" | "verificar";
-
-/**
- * Distingue un fallo REAL de envío de cualquier otro error del flujo. Solo el
- * primero se muestra: los demás (correo inexistente, sobre todo) caen en el
- * mensaje neutro.
- */
-function esEnvioFallido(err: unknown): boolean {
-  return err instanceof ConvexError && String(err.data).includes(ENVIO_FALLIDO);
-}
 
 function GoogleIcon() {
   return (
@@ -60,6 +51,7 @@ function GoogleIcon() {
 
 export default function LoginPage() {
   const { signIn } = useAuthActions();
+  const solicitarCodigo = useAction(api.recuperacion.solicitarCodigo);
   const { isAuthenticated, isLoading } = useConvexAuth();
   const router = useRouter();
   const [showPass, setShowPass] = useState(false);
@@ -102,19 +94,26 @@ export default function LoginPage() {
     const form = new FormData(e.currentTarget);
     const email = normalizarEmail(String(form.get("email") ?? ""));
     setSubmitting(true);
+    // Se llama a nuestra acción, NO a `signIn` directamente, porque devuelve un
+    // VALOR en vez de lanzar: la marca del fallo de envío no sobrevive el viaje
+    // al navegador dentro de un error. El detalle, en convex/recuperacion.ts.
+    //
+    // Un fallo real de envío SÍ se muestra: callarlo diría que mandamos un
+    // código que nunca salió. El correo inexistente, en cambio, devuelve
+    // "enviado" desde el servidor a propósito, para no revelar qué correos
+    // tienen acceso.
+    let resultado: "enviado" | "fallo_envio";
     try {
-      await signIn("password", { email, flow: "reset" });
-    } catch (err) {
-      // Un fallo real de envío SÍ se muestra: callarlo diría que mandamos un
-      // código que nunca salió. Cualquier otro error se traga a propósito
-      // (típicamente "no existe esa cuenta") para no revelar qué correos
-      // tienen acceso — de ahí que el camino de éxito y el de error acaben
-      // los dos en el mismo mensaje neutro.
-      if (esEnvioFallido(err)) {
-        setError("No pudimos enviar el correo. Probá de nuevo en unos minutos.");
-        setSubmitting(false);
-        return;
-      }
+      resultado = await solicitarCodigo({ email });
+    } catch {
+      // Solo se llega acá si la acción ni siquiera pudo ejecutarse (por ejemplo
+      // sin red en el navegador): tampoco se envió nada.
+      resultado = "fallo_envio";
+    }
+    if (resultado === "fallo_envio") {
+      setError("No pudimos enviar el correo. Probá de nuevo en unos minutos.");
+      setSubmitting(false);
+      return;
     }
     setEmailReset(email);
     setPaso("verificar");

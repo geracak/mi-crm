@@ -24,6 +24,11 @@ const DIGITOS = 8;
 /** Cuerpo de la respuesta que se incluye en los errores, recortado. */
 const MAX_CUERPO_ERROR = 300;
 
+const URL_RESEND = "https://api.resend.com/emails";
+
+/** Un cuelgue de red se convierte en error limpio en vez de agotar la acción. */
+const TIMEOUT_MS = 10_000;
+
 /**
  * Código numérico de 8 dígitos con muestreo por rechazo.
  *
@@ -93,43 +98,66 @@ const sendVerificationRequest: EmailConfig["sendVerificationRequest"] = async ({
     );
   }
 
-  const respuesta = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: "Vibe CRM <no-reply@red-24.com>",
-      // El `identifier` llega SIN normalizar (es `params.email` tal cual lo
-      // mandó quien llamó): `createVerificationCode` devuelve `email ?? phone`
-      // en crudo. Un espacio final o mayúsculas harían que Resend rechazara la
-      // dirección con un 422.
-      to: [normalizarEmail(email)],
-      subject: `Tu código para recuperar la contraseña: ${token}`,
-      text: [
-        "Pediste recuperar tu contraseña de Vibe CRM.",
-        "",
-        `Tu código es: ${token}`,
-        "",
-        `Vence en ${MINUTOS_DE_VIDA} minutos y solo se puede usar una vez.`,
-        "Si no lo pediste vos, ignorá este mensaje: tu contraseña no cambia.",
-      ].join("\n"),
-      html: [
-        "<p>Pediste recuperar tu contraseña de Vibe CRM.</p>",
-        `<p style="font-size:28px;font-weight:600;letter-spacing:4px">${token}</p>`,
-        `<p>Vence en ${MINUTOS_DE_VIDA} minutos y solo se puede usar una vez.</p>`,
-        "<p>Si no lo pediste vos, ignorá este mensaje: tu contraseña no cambia.</p>",
-      ].join(""),
-    }),
-  });
+  // ⚠️ El `fetch` va envuelto a propósito. `fetch` LANZA (no devuelve una
+  // respuesta) ante fallos de transporte: DNS, TLS, red caída, timeout. Ese
+  // error sería un Error normal, no un ConvexError con la marca, así que la
+  // interfaz lo tomaría por "cualquier otro error" y mostraría el mensaje
+  // neutro — diría que enviamos un código que nunca salió. Comprobar
+  // `respuesta.ok` solo cubre lo que pasa DESPUÉS de tener respuesta.
+  let respuesta: Response;
+  try {
+    respuesta = await fetch(URL_RESEND, {
+      method: "POST",
+      // Un cuelgue se corta acá en vez de agotar el tiempo de la acción; el
+      // AbortError cae en este mismo catch.
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: "Vibe CRM <no-reply@red-24.com>",
+        // El `identifier` llega SIN normalizar (es `params.email` tal cual lo
+        // mandó quien llamó): `createVerificationCode` devuelve `email ?? phone`
+        // en crudo. Un espacio final o mayúsculas harían que Resend rechazara
+        // la dirección con un 422.
+        to: [normalizarEmail(email)],
+        subject: `Tu código para recuperar la contraseña: ${token}`,
+        text: [
+          "Pediste recuperar tu contraseña de Vibe CRM.",
+          "",
+          `Tu código es: ${token}`,
+          "",
+          `Vence en ${MINUTOS_DE_VIDA} minutos y solo se puede usar una vez.`,
+          "Si no lo pediste vos, ignorá este mensaje: tu contraseña no cambia.",
+        ].join("\n"),
+        html: [
+          "<p>Pediste recuperar tu contraseña de Vibe CRM.</p>",
+          `<p style="font-size:28px;font-weight:600;letter-spacing:4px">${token}</p>`,
+          `<p>Vence en ${MINUTOS_DE_VIDA} minutos y solo se puede usar una vez.</p>`,
+          "<p>Si no lo pediste vos, ignorá este mensaje: tu contraseña no cambia.</p>",
+        ].join(""),
+      }),
+    });
+  } catch (causa) {
+    // Solo el mensaje, recortado: nunca la traza, ni las cabeceras, ni la clave.
+    const detalle = (
+      causa instanceof Error ? causa.message : String(causa)
+    ).slice(0, MAX_CUERPO_ERROR);
+    throw new ConvexError(
+      `${ENVIO_FALLIDO}: no se pudo contactar con Resend: ${detalle}`,
+    );
+  }
 
   // `fetch` NO lanza en 4xx/5xx. Sin esto, un rechazo de Resend se tomaría por
   // envío correcto y la interfaz diría que mandó un código que no existe.
   if (!respuesta.ok) {
     // Se incluyen estado y cuerpo recortado para poder diagnosticar; jamás las
-    // cabeceras ni la API key.
-    const cuerpo = (await respuesta.text()).slice(0, MAX_CUERPO_ERROR);
+    // cabeceras ni la API key. `text()` también puede lanzar si la conexión se
+    // corta a media lectura, así que no puede tumbar el error real.
+    const cuerpo = (
+      await respuesta.text().catch(() => "(sin cuerpo)")
+    ).slice(0, MAX_CUERPO_ERROR);
     throw new ConvexError(
       `${ENVIO_FALLIDO}: Resend rechazó el envío (${respuesta.status}): ${cuerpo}`,
     );
