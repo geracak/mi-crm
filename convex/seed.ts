@@ -6,9 +6,17 @@ import type { DataModel } from "./_generated/dataModel";
 
 // ⚠️ GER-238: no volver a correr `sembrarUsuarios` ni `resetearPasswords` contra
 // producción sin revisar antes el riesgo de duplicado — ambas buscan a Marta y
-// Carlos por email hardcodeado (`marta@vibecrm.local`/`carlos@vibecrm.local`),
-// que puede no coincidir con `users.email` si esa cuenta cambió de email tras
-// vincularse con Google (decisión Diferida, ver la issue).
+// Carlos por email hardcodeado, que puede no coincidir con `users.email` si esa
+// cuenta cambió de email tras vincularse con Google (decisión Diferida, ver la
+// issue).
+//
+// ⚠️ GER-239: el email de Marta pasó a ser el real (`gera.cak@gmail.com`) para
+// que la recuperación de contraseña pueda entregarle el código. Es el mismo
+// valor al que `authMaintenance:migrarIdentificadorPassword` mueve su
+// `providerAccountId`: si se cambia aquí, hay que cambiarlo allí, o el seed
+// volvería a crear una credencial con el identificador viejo.
+// Carlos sigue en `carlos@vibecrm.local`, un dominio SIN buzón: hoy no puede
+// recuperar contraseña. Pendiente de decisión de Gerardo (fuera de GER-239).
 
 /** Busca un usuario por email (uso interno del seed, para idempotencia). */
 export const buscarPorEmail = internalQuery({
@@ -37,7 +45,7 @@ export const sembrarUsuarios = internalAction({
   handler: async (ctx, args) => {
     const cuentas = [
       {
-        email: "marta@vibecrm.local",
+        email: "gera.cak@gmail.com",
         name: "Marta López",
         rol: "propietaria" as const,
         password: args.martaPassword,
@@ -84,7 +92,7 @@ export const resetearPasswords = internalAction({
   handler: async (ctx, args) => {
     const cuentas = [
       {
-        email: "marta@vibecrm.local",
+        email: "gera.cak@gmail.com",
         name: "Marta López",
         rol: "propietaria" as const,
       },
