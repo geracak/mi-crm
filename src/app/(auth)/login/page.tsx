@@ -133,6 +133,11 @@ export default function LoginPage() {
     // Se valida antes de llamar: el código se consume (y se borra) en el
     // servidor al primer intento, así que un error evitable costaría pedir uno
     // nuevo.
+    //
+    // Estas comprobaciones viven en JS a propósito, sin `minLength` en el
+    // input: el atributo hace que el navegador bloquee el envío antes y muestre
+    // su propio aviso, que va en el idioma del navegador (en inglés para la
+    // mayoría) y sin los estilos de la app.
     if (newPassword.length < MIN_PASSWORD) {
       setError(`La contraseña debe tener al menos ${MIN_PASSWORD} caracteres.`);
       return;
@@ -375,7 +380,6 @@ export default function LoginPage() {
                     type={showPass ? "text" : "password"}
                     autoComplete="new-password"
                     required
-                    minLength={MIN_PASSWORD}
                     placeholder="••••••••"
                     className="pr-11"
                     helper={`Mínimo ${MIN_PASSWORD} caracteres.`}
@@ -403,7 +407,6 @@ export default function LoginPage() {
                   type={showPass ? "text" : "password"}
                   autoComplete="new-password"
                   required
-                  minLength={MIN_PASSWORD}
                   placeholder="••••••••"
                 />
 
