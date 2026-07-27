@@ -11,4 +11,12 @@ crons.interval(
   internal.authMaintenance.limpiarVerifiersHuerfanos,
 );
 
+// GER-239: `recuperacionThrottle` la escribe una acción PUBLICA (sin sesion),
+// asi que nada impide que alguien la haga crecer con correos inventados.
+crons.interval(
+  "limpiar throttle vencido de recuperacion de contrasena",
+  { hours: 1 },
+  internal.recuperacion.limpiarThrottleAntiguo,
+);
+
 export default crons;
