@@ -165,7 +165,11 @@ export default function LoginPage() {
     setError(null);
     setGoogleSubmitting(true);
     sessionStorage.setItem(GOOGLE_INTENTO_KEY, "1");
-    await signIn("google", { redirectTo: "/login" });
+    // GER-238: el origen va explícito. Un destino relativo lo resuelve la
+    // librería contra `SITE_URL`, que es uno solo, así que quien entra por un
+    // dominio terminaba con la sesión puesta en el otro. El backend valida este
+    // origen contra su lista blanca (`convex/auth.ts`, callback `redirect`).
+    await signIn("google", { redirectTo: `${window.location.origin}/login` });
   }
 
   // GER-238: `@convex-dev/auth` solo hace `history.replaceState` al consumir el
