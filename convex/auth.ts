@@ -6,6 +6,7 @@ import type { DataModel } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 import { ResendOTP } from "./ResendOTP";
 import { normalizarEmail } from "./emailUtils";
+import { origenesPermitidos, resolverDestino } from "./redirectOrigins";
 
 /**
  * GER-240 — Mensaje ÚNICO de rechazo del registro. Se usa igual en el wrapper y
@@ -131,6 +132,31 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
     }),
   ],
   callbacks: {
+    // GER-238: sustituye al validador por defecto para que el login pueda
+    // completarse desde cualquiera de los orígenes dados de alta, no solo desde
+    // `SITE_URL`. Corre en el callback de OAuth, con el `redirectTo` que quedó
+    // guardado en cookie al arrancar el flujo
+    // (`dist/server/implementation/index.js:168-190`). La lógica vive en
+    // `redirectOrigins.ts` para poder ejercitarla aislada.
+    async redirect({ redirectTo }) {
+      const siteUrl = process.env.SITE_URL;
+      if (siteUrl === undefined || siteUrl === "") {
+        throw new Error("Falta la variable de entorno SITE_URL");
+      }
+      try {
+        return resolverDestino(
+          redirectTo,
+          siteUrl,
+          origenesPermitidos(siteUrl, process.env.AUTH_ADDITIONAL_ORIGINS),
+        );
+      } catch (error) {
+        // El motivo queda en los logs del deployment; hacia afuera, un error
+        // neutro. La librería atrapa esto y redirige sin parámetro de error.
+        console.error("GER-238 redirect rechazado:", (error as Error).message);
+        throw new ConvexError("Destino de redirección no permitido");
+      }
+    },
+
     // Regla de aprovisionamiento (no "rechazar toda creación", que bloquearía el
     // propio seed): se crea un usuario nuevo SOLO si el profile trae un rol
     // válido, y ese rol solo lo produce el seed interno vía createAccount.
