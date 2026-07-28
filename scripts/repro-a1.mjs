@@ -17,9 +17,9 @@
  * ⚠️ SOLO CONTRA EL DEPLOYMENT DE DESARROLLO. La puerta de entorno es
  * `resolverDeploymentDev` y es fail-closed: aborta antes de abrir el cliente si
  * el deployment no es `dev:`, si la URL del bundle no es exactamente la de ese
- * mismo deployment, o si hay variables capaces de llevarle el CLI a otro sitio
- * —vengan del proceso o de los dotenv que el propio CLI carga—. Ver el porqué
- * en el bloque de esa función (hallazgo M1).
+ * mismo deployment. Y los oráculos no pueden desviarse aunque el entorno diga
+ * otra cosa: el CLI se lanza con el deployment IMPUESTO (`entornoDelCli`). Ver
+ * el porqué en el bloque de cada una de esas dos funciones (hallazgo M1).
  *
  * ⚠️ EL VEREDICTO NO PUEDE LEER MENSAJES DE ERROR. Convex censura el texto de
  * los `Error` normales fuera de desarrollo local y devuelve "Server Error", así
@@ -119,8 +119,9 @@ function abortar(motivo) {
 
 /**
  * Variables que le cambian el deployment al CLI por debajo de
- * `CONVEX_DEPLOYMENT`. `getDeploymentSelectionFromEnv` mira PRIMERO la clave de
- * deploy y, si la encuentra, `CONVEX_DEPLOYMENT` ya no decide nada
+ * `CONVEX_DEPLOYMENT`, y que por eso se le imponen vacías al hijo.
+ * `getDeploymentSelectionFromEnv` mira PRIMERO la clave de deploy y, si la
+ * encuentra, `CONVEX_DEPLOYMENT` ya no decide nada
  * (`convex/dist/cjs/cli/lib/deploymentSelection.js:443-446`); el par
  * self-hosted redirige por su cuenta (`:516-559`).
  */
@@ -130,34 +131,6 @@ const VARIABLES_QUE_DESVIAN_EL_CLI = [
   "CONVEX_SELF_HOSTED_URL",
   "CONVEX_SELF_HOSTED_ADMIN_KEY",
 ];
-
-/**
- * Fuentes de entorno del CLI, EN SU ORDEN DE PRECEDENCIA.
- *
- * El hijo no hereda solo `process.env`: antes de elegir deployment ejecuta
- * `dotenv.config({ path: ".env.local" })` y después `dotenv.config()`, que lee
- * `.env` (`deploymentSelection.js:95-96` y `:371-372`). Como dotenv NO pisa lo
- * que ya está definido, el valor efectivo de cada variable es el primero que
- * aparezca recorriendo: proceso → `.env.local` → `.env`.
- */
-const FUENTES_DOTENV_DEL_CLI = [".env.local", ".env"];
-
-/**
- * Resuelve una variable igual que la resolvería el proceso hijo, e informa de
- * DÓNDE la encontró. Los valores vacíos cuentan como ausentes, que es como los
- * trata el CLI (`deploymentSelection.js:377-381`).
- */
-function resolverComoElCli(nombre, fuentes) {
-  if ((process.env[nombre] ?? "") !== "") {
-    return { valor: process.env[nombre], origen: "el proceso" };
-  }
-  for (const { ruta, vars } of fuentes) {
-    if ((vars[nombre] ?? "") !== "") {
-      return { valor: vars[nombre], origen: ruta };
-    }
-  }
-  return null;
-}
 
 /**
  * GER-240 · M1 — Puerta de entorno fail-closed. Corre ANTES de construir el
@@ -179,50 +152,36 @@ function resolverComoElCli(nombre, fuentes) {
  * coincidir carácter a carácter con la derivada, porque es la URL que viaja en
  * el bundle y la que vería el atacante. Discrepancia = abortar.
  *
- * ⚠️ Segunda mitad del mismo agujero: no basta con mirar `process.env`. El CLI
- * corre como proceso HIJO y carga sus propios dotenv (`.env.local` y `.env`)
- * antes de elegir deployment, así que una clave de deploy que viva SOLO en uno
- * de esos archivos nunca aparecería en el proceso padre, entraría en el hijo y
- * tomaría precedencia sobre `CONVEX_DEPLOYMENT`. Las sondas seguirían en el
- * deployment derivado y los oráculos se irían a otro entorno, posiblemente
- * producción: evidencia de dos sitios distintos presentada como si fuera de uno.
- * Por eso la puerta resuelve cada variable sobre el entorno EFECTIVO del hijo
- * —proceso, `.env.local`, `.env`— y no sobre el del padre.
+ * ⚠️ Por qué esta puerta NO intenta detectar autoridades sueltas en los dotenv
+ * del hijo. Se probó y no se sostiene: el CLI carga sus propios `.env.local` y
+ * `.env` con dotenv 16.6.1, cuya gramática acepta cosas que un lector casero no
+ * ve —`export CONVEX_DEPLOY_KEY=…`, `CONVEX_DEPLOY_KEY: …`, comillas de tres
+ * clases— (`convex/dist/cli.bundle.cjs:91609`). Cualquier réplica parcial de esa
+ * gramática deja huecos por definición, y perseguirlos es una carrera perdida.
+ *
+ * Se invierte el enfoque: no se detecta, se CONTIENE. Ver `entornoDelCli`.
+ * Consecuencia para esta función: lo que lea de `.env.local` no decide la
+ * seguridad, solo la comodidad. Si no encuentra `CONVEX_DEPLOYMENT`, aborta; y
+ * el valor que sí encuentre es el que se le impone al hijo, así que sondas y
+ * oráculos acaban en el mismo sitio por construcción, no por coincidencia.
  */
 function resolverDeploymentDev() {
-  const fuentes = FUENTES_DOTENV_DEL_CLI.map((nombre) => ({
-    ruta: nombre,
-    vars: leerArchivoEnv(join(RAIZ, nombre)),
-  }));
+  // Se lee SOLO `.env.local`, y para dos valores. `.env` ya no se mira: lo que
+  // contenga es irrelevante una vez el hijo va con el entorno impuesto.
+  const env = leerArchivoEnv(join(RAIZ, ".env.local"));
 
-  // Antes que nada: si algo puede desviar al hijo, no hay nada que validar.
-  // Se listan TODAS las coincidencias, no solo la primera, para que arreglarlo
-  // no sea un juego de ir descubriéndolas de una en una.
-  const desviadas = VARIABLES_QUE_DESVIAN_EL_CLI.map((nombre) => {
-    const hallazgo = resolverComoElCli(nombre, fuentes);
-    return hallazgo === null ? null : `${nombre} (en ${hallazgo.origen})`;
-  }).filter((v) => v !== null);
-  if (desviadas.length > 0) {
-    abortar(
-      "hay autoridades que pueden llevar el CLI a otro deployment:\n" +
-        desviadas.map((d) => `  · ${d}`).join("\n") +
-        "\n  El CLI las carga por su cuenta desde .env.local y .env, y tienen precedencia sobre\n" +
-        "  CONVEX_DEPLOYMENT, así que los oráculos podrían leer otro entorno. Quitalas antes de seguir.",
-    );
+  const declarado = process.env.CONVEX_DEPLOYMENT ?? env.CONVEX_DEPLOYMENT ?? "";
+  const origen = process.env.CONVEX_DEPLOYMENT ? "el proceso" : ".env.local";
+  if (declarado === "") {
+    abortar("no hay CONVEX_DEPLOYMENT ni en el proceso ni en .env.local.");
   }
-
-  const efectivo = resolverComoElCli("CONVEX_DEPLOYMENT", fuentes);
-  if (efectivo === null) {
-    abortar("no hay CONVEX_DEPLOYMENT en el proceso, en .env.local ni en .env.");
-  }
-  const declarado = efectivo.valor;
   const separador = declarado.indexOf(":");
   const tipo = separador === -1 ? "" : declarado.slice(0, separador);
   const nombre = separador === -1 ? "" : declarado.slice(separador + 1);
 
   if (tipo !== "dev") {
     abortar(
-      `CONVEX_DEPLOYMENT no es de desarrollo (vale "${declarado}", según ${efectivo.origen}). ` +
+      `CONVEX_DEPLOYMENT no es de desarrollo (vale "${declarado}", según ${origen}). ` +
         "Este script no se corre nunca contra producción.",
     );
   }
@@ -236,21 +195,52 @@ function resolverDeploymentDev() {
   }
 
   const url = `https://${nombre}.convex.cloud`;
-  const publicadaEn = resolverComoElCli("NEXT_PUBLIC_CONVEX_URL", fuentes);
-  if (publicadaEn === null) {
-    abortar("no hay NEXT_PUBLIC_CONVEX_URL en el proceso, en .env.local ni en .env.");
+  const publicada = (
+    process.env.NEXT_PUBLIC_CONVEX_URL ??
+    env.NEXT_PUBLIC_CONVEX_URL ??
+    ""
+  ).replace(/\/+$/, "");
+  if (publicada === "") {
+    abortar("no hay NEXT_PUBLIC_CONVEX_URL ni en el proceso ni en .env.local.");
   }
-  const publicada = publicadaEn.valor.replace(/\/+$/, "");
   if (publicada !== url) {
     abortar(
       "NEXT_PUBLIC_CONVEX_URL y CONVEX_DEPLOYMENT identifican deployments DISTINTOS.\n" +
-        `  CONVEX_DEPLOYMENT      : ${declarado}  →  ${url}   (según ${efectivo.origen})\n` +
-        `  NEXT_PUBLIC_CONVEX_URL : ${publicada}   (según ${publicadaEn.origen})\n` +
+        `  CONVEX_DEPLOYMENT      : ${declarado}  →  ${url}   (según ${origen})\n` +
+        `  NEXT_PUBLIC_CONVEX_URL : ${publicada}\n` +
         "  Las sondas irían a un deployment y los oráculos a otro. Corregilo antes de seguir.",
     );
   }
 
-  return { declarado, nombre, url, origen: efectivo.origen };
+  return { declarado, nombre, url, origen };
+}
+
+/**
+ * GER-240 · M1 — CONTENCIÓN del proceso hijo. Es lo que sostiene la garantía,
+ * en lugar de intentar adivinar qué dicen los archivos del proyecto.
+ *
+ * dotenv NO pisa una variable que ya exista en el entorno recibido, y decide por
+ * PRESENCIA, no por valor: `hasOwnProperty(processEnv, key)`
+ * (`cli.bundle.cjs:91854`). El CLI, a su vez, trata la cadena vacía como
+ * ausencia (`deploymentSelection.js:377-381`). De ahí las dos jugadas:
+ *
+ *   · `CONVEX_DEPLOYMENT` se IMPONE con el valor `dev:` ya validado, así que
+ *     ningún dotenv puede reemplazarlo.
+ *   · las variables que tendrían precedencia sobre él se imponen VACÍAS: quedan
+ *     presentes —y por tanto blindadas frente a dotenv— pero el CLI las lee como
+ *     si no estuvieran.
+ *
+ * El resultado no depende de saber leer los archivos: por muy exótica que sea la
+ * sintaxis con que alguien declare una clave de deploy en `.env.local` o `.env`,
+ * dotenv se encontrará la variable ya definida y no la escribirá. Los oráculos
+ * no pueden salirse del deployment que validó la puerta.
+ */
+function entornoDelCli(destino) {
+  const entorno = { ...process.env, CONVEX_DEPLOYMENT: destino.declarado };
+  for (const variable of VARIABLES_QUE_DESVIAN_EL_CLI) {
+    entorno[variable] = "";
+  }
+  return entorno;
 }
 
 /**
@@ -262,19 +252,28 @@ function resolverDeploymentDev() {
  * espacios (esta misma, «vibe coding», los tiene).
  *
  * El `cwd` se fija a la raíz del proyecto porque el CLI abre sus dotenv por
- * ruta RELATIVA: sin esto, lanzar el script desde otro directorio haría que la
- * puerta validara unos archivos y el hijo leyera otros.
+ * ruta RELATIVA: sin esto, lanzar el script desde otro directorio haría que el
+ * hijo leyera unos archivos distintos de los del proyecto.
+ *
+ * El entorno va IMPUESTO por `entornoDelCli`, que es lo que garantiza que estas
+ * lecturas no puedan salirse del deployment validado.
  */
 const CLI_CONVEX = fileURLToPath(
   new URL("../node_modules/convex/bin/main.js", import.meta.url),
 );
 
-function leerTabla(tabla) {
+function crearLectorDeTablas(destino) {
+  const env = entornoDelCli(destino);
+  return (tabla) => leerTablaCon(env, tabla);
+}
+
+function leerTablaCon(env, tabla) {
   const salida = execFileSync(
     process.execPath,
     [CLI_CONVEX, "data", tabla, "--format", "json", "--limit", "100"],
     {
       cwd: RAIZ,
+      env,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       maxBuffer: 8 * 1024 * 1024,
@@ -340,10 +339,13 @@ async function main() {
     );
   }
 
+  const leerTabla = crearLectorDeTablas(destino);
   const cliente = new ConvexHttpClient(destino.url);
   console.log(`Deployment : ${destino.declarado}  (según ${destino.origen})`);
   console.log(`URL sondas : ${destino.url}  (derivada, = NEXT_PUBLIC_CONVEX_URL)`);
-  console.log(`Oráculos   : convex data sobre ${destino.declarado}, cwd ${RAIZ}\n`);
+  console.log(`Oráculos   : convex data con CONVEX_DEPLOYMENT impuesta a ${destino.declarado},`);
+  console.log(`             ${VARIABLES_QUE_DESVIAN_EL_CLI.join(", ")} impuestas vacías,`);
+  console.log(`             cwd ${RAIZ}\n`);
 
   const cuentas = leerTabla("authAccounts");
   const idObjetivo = idDeCuenta(cuentas, EMAIL_OBJETIVO);
