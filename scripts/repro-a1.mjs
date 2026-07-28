@@ -14,8 +14,11 @@
  * la interfaz ni por el proxy de Next: es exactamente lo que haría un atacante
  * que solo conoce `NEXT_PUBLIC_CONVEX_URL` (viaja en el bundle del navegador).
  *
- * ⚠️ SOLO CONTRA EL DEPLOYMENT DE DESARROLLO. Aborta si `CONVEX_DEPLOYMENT` no
- * empieza por `dev:`.
+ * ⚠️ SOLO CONTRA EL DEPLOYMENT DE DESARROLLO. La puerta de entorno es
+ * `resolverDeploymentDev` y es fail-closed: aborta antes de abrir el cliente si
+ * el deployment no es `dev:`, si la URL del bundle no es exactamente la de ese
+ * mismo deployment, o si hay variables de proceso capaces de llevarle el CLI a
+ * otro sitio. Ver el porqué en el bloque de esa función (hallazgo M1).
  *
  * ⚠️ EL VEREDICTO NO PUEDE LEER MENSAJES DE ERROR. Convex censura el texto de
  * los `Error` normales fuera de desarrollo local y devuelve "Server Error", así
@@ -62,6 +65,13 @@ const PASSWORD_INCORRECTA = "contrasena-incorrecta-a-proposito-000";
 const RECHAZO_ESPERADO = "Registro no permitido";
 const INTENTOS = 20;
 
+/**
+ * Lee `.env.local` con las mismas reglas que dotenv, que es lo que aplica el CLI
+ * de Convex. Importa el detalle del comentario en línea: `CONVEX_DEPLOYMENT`
+ * lleva uno (`dev:… # team: …, project: …`) y un parseo ingenuo lo arrastraría
+ * dentro del valor, rompiendo la derivación del nombre del deployment que hace
+ * `resolverDeploymentDev`.
+ */
 function leerEnvLocal() {
   const texto = readFileSync(new URL("../.env.local", import.meta.url), "utf8");
   const vars = {};
@@ -70,12 +80,115 @@ function leerEnvLocal() {
     if (limpia === "" || limpia.startsWith("#")) continue;
     const corte = limpia.indexOf("=");
     if (corte === -1) continue;
-    vars[limpia.slice(0, corte).trim()] = limpia
-      .slice(corte + 1)
-      .trim()
-      .replace(/^["']|["']$/g, "");
+    let valor = limpia.slice(corte + 1).trim();
+    const comilla = valor[0];
+    if (comilla === '"' || comilla === "'") {
+      const cierre = valor.indexOf(comilla, 1);
+      valor = cierre === -1 ? valor.slice(1) : valor.slice(1, cierre);
+    } else {
+      // En un valor SIN comillas, dotenv corta el valor en el primer ` #`.
+      valor = valor.split(/\s+#/)[0].trim();
+    }
+    vars[limpia.slice(0, corte).trim()] = valor;
   }
   return vars;
+}
+
+function abortar(motivo) {
+  console.error(`ABORTADO: ${motivo}`);
+  process.exit(1);
+}
+
+/**
+ * Variables de PROCESO que le cambian el deployment al CLI por debajo, sin que
+ * `.env.local` tenga nada que decir (`convex/dist/cjs/cli/lib/
+ * deploymentSelection.js:97` para la clave de deploy, `:516-559` para el modo
+ * self-hosted). Si alguna está puesta, el archivo que validamos deja de ser la
+ * autoridad y la puerta no puede prometer nada.
+ */
+const VARIABLES_QUE_DESVIAN_EL_CLI = [
+  "CONVEX_DEPLOY_KEY",
+  "CONVEX_DEPLOYMENT_TOKEN",
+  "CONVEX_SELF_HOSTED_URL",
+  "CONVEX_SELF_HOSTED_ADMIN_KEY",
+];
+
+/**
+ * GER-240 · M1 — Puerta de entorno fail-closed. Corre ANTES de construir el
+ * cliente y antes de la primera llamada.
+ *
+ * ⚠️ El fallo que cierra: la versión anterior validaba que `CONVEX_DEPLOYMENT`
+ * empezara por `dev:` pero abría el cliente HTTP con `NEXT_PUBLIC_CONVEX_URL`.
+ * Dos autoridades independientes, nada que las atara. Con el deployment en
+ * `dev:` y la URL apuntando a producción —basta una edición a medias del
+ * `.env.local`— las sondas A/B/D se lanzaban contra PRODUCCIÓN mientras los
+ * oráculos (`convex data`, que sigue a `CONVEX_DEPLOYMENT`) leían las tablas de
+ * DESARROLLO. Consecuencia: intentos de contraseña reales contra la cuenta de
+ * la propietaria —incluido el del camino de éxito, que puede crear sesión— y un
+ * veredicto sin valor por mezclar entornos.
+ *
+ * ⚠️ La autoridad ahora es ÚNICA: `CONVEX_DEPLOYMENT`, que es de quien depende
+ * el CLI. La URL del cliente se DERIVA de su nombre y no se lee del entorno.
+ * `NEXT_PUBLIC_CONVEX_URL` se conserva pero degradada a aserción: tiene que
+ * coincidir carácter a carácter con la derivada, porque es la URL que viaja en
+ * el bundle y la que vería el atacante. Discrepancia = abortar.
+ */
+function resolverDeploymentDev(env) {
+  const declarado = env.CONVEX_DEPLOYMENT ?? "";
+  const separador = declarado.indexOf(":");
+  const tipo = separador === -1 ? "" : declarado.slice(0, separador);
+  const nombre = separador === -1 ? "" : declarado.slice(separador + 1);
+
+  if (tipo !== "dev") {
+    abortar(
+      `CONVEX_DEPLOYMENT no es de desarrollo (vale "${declarado || "(vacío)"}"). ` +
+        "Este script no se corre nunca contra producción.",
+    );
+  }
+  // El nombre se convierte en un host: cualquier cosa fuera de este alfabeto
+  // significa que el parseo no entendió el valor, y de ahí no se deriva una URL.
+  if (!/^[a-z0-9-]+$/.test(nombre)) {
+    abortar(
+      `el nombre del deployment ("${nombre}") no tiene la forma esperada; ` +
+        "no se puede derivar su URL con seguridad.",
+    );
+  }
+
+  const desviadas = VARIABLES_QUE_DESVIAN_EL_CLI.filter(
+    (v) => (process.env[v] ?? "") !== "",
+  );
+  if (desviadas.length > 0) {
+    abortar(
+      `hay variables de proceso que pueden llevar el CLI a otro deployment: ${desviadas.join(", ")}.\n` +
+        "  Con ellas puestas, .env.local ya no es la autoridad y los oráculos podrían leer otro entorno.",
+    );
+  }
+  if (
+    process.env.CONVEX_DEPLOYMENT !== undefined &&
+    process.env.CONVEX_DEPLOYMENT !== declarado
+  ) {
+    abortar(
+      "CONVEX_DEPLOYMENT está puesta en el proceso con un valor distinto al de .env.local.\n" +
+        `  proceso    : ${process.env.CONVEX_DEPLOYMENT}\n` +
+        `  .env.local : ${declarado}`,
+    );
+  }
+
+  const url = `https://${nombre}.convex.cloud`;
+  const publicada = (env.NEXT_PUBLIC_CONVEX_URL ?? "").replace(/\/+$/, "");
+  if (publicada === "") {
+    abortar("falta NEXT_PUBLIC_CONVEX_URL en .env.local");
+  }
+  if (publicada !== url) {
+    abortar(
+      "NEXT_PUBLIC_CONVEX_URL y CONVEX_DEPLOYMENT identifican deployments DISTINTOS.\n" +
+        `  CONVEX_DEPLOYMENT      : ${declarado}  →  ${url}\n` +
+        `  NEXT_PUBLIC_CONVEX_URL : ${publicada}\n` +
+        "  Las sondas irían a un deployment y los oráculos a otro. Corregí .env.local antes de seguir.",
+    );
+  }
+
+  return { declarado, nombre, url };
 }
 
 /**
@@ -148,28 +261,20 @@ const resumir = (e) =>
 async function main() {
   const env = leerEnvLocal();
 
-  if (!(env.CONVEX_DEPLOYMENT ?? "").startsWith("dev:")) {
-    console.error(
-      `ABORTADO: CONVEX_DEPLOYMENT no es de desarrollo (empieza por "${(env.CONVEX_DEPLOYMENT ?? "").split(":")[0]}:"). Este script no se corre nunca contra producción.`,
-    );
-    process.exit(1);
-  }
-  const url = env.NEXT_PUBLIC_CONVEX_URL;
-  if (!url) {
-    console.error("ABORTADO: falta NEXT_PUBLIC_CONVEX_URL en .env.local");
-    process.exit(1);
-  }
+  const destino = resolverDeploymentDev(env);
+
   const passwordCorrecta = process.env.REPRO_PASSWORD_CORRECTA;
   if (!passwordCorrecta) {
-    console.error(
-      "ABORTADO: falta REPRO_PASSWORD_CORRECTA. Fijala a la contraseña de desarrollo de la cuenta objetivo\n" +
-        "(se establece con: npx convex run seed:resetearPasswords '{\"password\":\"...\"}').",
+    abortar(
+      "falta REPRO_PASSWORD_CORRECTA. Fijala a la contraseña de desarrollo de la cuenta objetivo\n" +
+        "  (se establece con: npx convex run seed:resetearPasswords '{\"password\":\"...\"}').",
     );
-    process.exit(1);
   }
 
-  const cliente = new ConvexHttpClient(url);
-  console.log(`Deployment: ${env.CONVEX_DEPLOYMENT}\n`);
+  const cliente = new ConvexHttpClient(destino.url);
+  console.log(`Deployment : ${destino.declarado}`);
+  console.log(`URL sondas : ${destino.url}  (derivada, = NEXT_PUBLIC_CONVEX_URL)`);
+  console.log(`Oráculos   : convex data sobre ${destino.declarado}\n`);
 
   const cuentas = leerTabla("authAccounts");
   const idObjetivo = idDeCuenta(cuentas, EMAIL_OBJETIVO);
