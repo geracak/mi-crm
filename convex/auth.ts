@@ -2,8 +2,9 @@ import { convexAuth } from "@convex-dev/auth/server";
 import { Password } from "@convex-dev/auth/providers/Password";
 import Google from "@auth/core/providers/google";
 import { ConvexError } from "convex/values";
-import type { DataModel } from "./_generated/dataModel";
-import type { MutationCtx } from "./_generated/server";
+import { internal } from "./_generated/api";
+import type { DataModel, Id } from "./_generated/dataModel";
+import type { ActionCtx, MutationCtx } from "./_generated/server";
 import { ResendOTP } from "./ResendOTP";
 import { normalizarEmail } from "./emailUtils";
 import { origenesPermitidos, resolverDestino } from "./redirectOrigins";
@@ -63,11 +64,50 @@ const passwordBase = Password<DataModel>({
  * Internal`), así que este acoplamiento se protege con la aserción de abajo:
  * si una futura versión cambia la forma, el módulo LANZA al cargarse y el
  * deploy falla ruidoso. Nunca en silencio, que es como se pierden los controles.
+ *
+ * GER-219 — el wrapper suma una tercera responsabilidad: apagar
+ * `users.passwordPendiente` cuando alguien completa un `reset-verification`.
+ * Va acá porque este es el único punto que ve TODOS los flujos de contraseña,
+ * y porque hacerlo en el servidor evita depender del handshake de sesión del
+ * navegador (el detalle, en el paso 3 del `authorize` de abajo).
  */
+
+/**
+ * Lo que devuelve el `authorize` del provider Password. Verificado en
+ * `@convex-dev/auth@0.0.94` (`src/providers/ConvexCredentials.ts:52-65`):
+ * `{ userId, sessionId? } | null`.
+ */
+type ResultadoAuthorize = {
+  userId: Id<"users">;
+  sessionId?: Id<"authSessions">;
+} | null;
+
+/**
+ * El `ctx` de `authorize` es `GenericActionCtxWithAuthConfig<DataModel>` (misma
+ * referencia), o sea un ActionCtx: tiene `runMutation`. Se declara solo lo que
+ * se usa, para no atarse a más superficie de la librería que la necesaria.
+ */
+type CtxAuthorize = { runMutation: ActionCtx["runMutation"] };
+
 type AuthorizeCredenciales = (
   params: Record<string, unknown>,
-  ctx: unknown,
-) => Promise<unknown>;
+  ctx: CtxAuthorize,
+) => Promise<ResultadoAuthorize>;
+
+/**
+ * Estrecha en RUNTIME el resultado antes de leer `userId`. No alcanza con el
+ * tipo: `authorizeOriginal` sale de un `options` interno casteado, así que el
+ * compilador no garantiza nada sobre lo que devuelve de verdad.
+ */
+function tieneUserId(
+  resultado: ResultadoAuthorize,
+): resultado is { userId: Id<"users">; sessionId?: Id<"authSessions"> } {
+  return (
+    resultado !== null &&
+    typeof resultado === "object" &&
+    typeof (resultado as { userId?: unknown }).userId === "string"
+  );
+}
 
 const opcionesPassword = (
   passwordBase as unknown as { options?: { authorize?: unknown } }
@@ -86,7 +126,7 @@ const PasswordEndurecido = {
   ...passwordBase,
   options: {
     ...opcionesPassword,
-    authorize: async (params: Record<string, unknown>, ctx: unknown) => {
+    authorize: async (params: Record<string, unknown>, ctx: CtxAuthorize) => {
       // 1) Registro cerrado, aplicado ANTES de mirar ninguna credencial. Cortar
       //    aquí es lo que elimina el acceso al `Provider.verify` sin límite.
       //    El mismo error para todos los casos: sin oráculo de enumeración.
@@ -106,7 +146,46 @@ const PasswordEndurecido = {
           ? { ...params, email: normalizarEmail(email) }
           : params;
 
-      return await authorizeOriginal(paramsNormalizados, ctx);
+      const resultado = await authorizeOriginal(paramsNormalizados, ctx);
+
+      // 3) GER-219 — apagar `passwordPendiente` cuando la persona ACABA de
+      //    elegir su contraseña. Este es el momento autoritativo: el
+      //    `reset-verification` de la librería ya corrió
+      //    `modifyAccountCredentials` con el secreto que tecleó ella
+      //    (`src/providers/Password.ts:178-205`), todo dentro de esta misma
+      //    llamada.
+      //
+      //    ⚠️ Por qué acá y no en el cliente: entre que `signIn()` devuelve y
+      //    el navegador confirma la sesión hay una demora (el handshake lo
+      //    arranca `ConvexProviderWithAuth` después, desde un efecto). Una
+      //    mutación lanzada desde el cliente justo después del `signIn` puede
+      //    salir sin sesión todavía, y `requireUsuario` la rechazaría: o el
+      //    flag se queda encendido para siempre, o el error se confunde con
+      //    "código incorrecto" sobre un reset que sí funcionó.
+      //
+      //    Solo corre en `reset-verification`. `signIn` y `reset` no tocan la
+      //    contraseña, así que no tienen nada que apagar.
+      if (params.flow === "reset-verification" && tieneUserId(resultado)) {
+        try {
+          await ctx.runMutation(internal.usuarios._marcarPasswordConfigurada, {
+            id: resultado.userId,
+          });
+        } catch (error) {
+          // Nunca hacer fallar el login por esto: la contraseña nueva YA quedó
+          // guardada, así que lanzar acá mostraría "código incorrecto o
+          // vencido" sobre un reset exitoso. El flag se apaga solo en el
+          // próximo reset, por este mismo camino.
+          //
+          // ⚠️ Se registra el mensaje del error y nada más. NUNCA `params`:
+          // ahí viajan `newPassword` y `code` en claro.
+          console.error(
+            "GER-219: no se pudo apagar passwordPendiente tras el reset:",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+
+      return resultado;
     },
   },
   // El objeto lleva `options`, que no está en el tipo público del provider. El
@@ -187,6 +266,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
       const profile = args.profile as Record<string, unknown> & {
         email?: string;
         emailVerified?: boolean;
+        passwordPendiente?: boolean;
       };
 
       if (args.provider.id === "google") {
@@ -228,6 +308,23 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         email: typeof profile.email === "string" ? profile.email : undefined,
         name: typeof profile.name === "string" ? profile.name : undefined,
         rol,
+        // GER-219 — UN campo más, nombrado explícitamente. Sigue sin haber
+        // spread del `profile`: esta lista blanca es el control que endureció
+        // GER-240 y se mantiene igual de estricta. Es seguro sumarlo acá porque
+        // esta rama solo la alcanza `createAccount` llamado desde nuestro
+        // propio código (`seed.ts`, `usuarios:invitar`) — el wrapper de arriba
+        // corta `flow: "signUp"` antes de llegar — y porque el campo NO da
+        // acceso a nada: solo decide a qué pantalla manda el login.
+        //
+        // Va en el MISMO insert a propósito: marcarlo en una segunda escritura
+        // dejaría la invitación a medias si esa escritura fallara, y esa cuenta
+        // ya no se podría arreglar desde /equipo (el alta chocaría con el
+        // control de duplicados y la persona nunca podría entrar).
+        //
+        // Cualquier valor que no sea exactamente `true` cae en `undefined`, que
+        // se lee como "ya tiene contraseña" — el default seguro, y lo que deja
+        // al seed funcionando sin cambios.
+        passwordPendiente: profile.passwordPendiente === true ? true : undefined,
       });
     },
   },
