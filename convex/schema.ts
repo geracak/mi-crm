@@ -55,6 +55,25 @@ export default defineSchema({
     // `undefined` cuenta como `false`: los usuarios que ya existían (el seed)
     // tienen su contraseña puesta, así que no hace falta migrarlos.
     passwordPendiente: v.optional(v.boolean()),
+    // GER-219 (E2) — cuándo vence el código de 8 dígitos que se le mandó por
+    // última vez a esta persona.
+    //
+    // ⚠️ Existe porque la librería solo admite UN vencimiento por proveedor
+    // (`provider.maxAge`, leído en `dist/server/implementation/signIn.js:61`) y
+    // acá hacen falta dos: la INVITACIÓN dura 24 h (nadie abre el correo al
+    // instante, y un "código vencido" sería lo primero que ve del producto)
+    // y la RECUPERACIÓN dura 15 minutos (ahí sí hay una contraseña vigente que
+    // proteger y quien lo pide está delante de la pantalla).
+    //
+    // `maxAge` queda en el máximo de los dos (24 h) como tope exterior, y el
+    // vencimiento real de cada código se guarda acá al enviarlo
+    // (`ResendOTP.sendVerificationRequest`) y se exige antes de cambiar la
+    // contraseña (wrapper `authorize` de `convex/auth.ts`).
+    //
+    // `undefined` = sin restricción extra, solo el tope de la librería. Es el
+    // estado de los códigos emitidos antes de esta entrega; no hace falta
+    // migrar nada porque con el `maxAge` viejo (15 min) ya vencieron todos.
+    codigoVenceEn: v.optional(v.number()),
   }).index("email", ["email"]),
 
   clientes: defineTable({

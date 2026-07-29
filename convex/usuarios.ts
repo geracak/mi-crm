@@ -6,9 +6,9 @@ import {
   internalMutation,
 } from "./_generated/server";
 import type { QueryCtx } from "./_generated/server";
-import type { DataModel, Id } from "./_generated/dataModel";
+import type { DataModel, Doc, Id } from "./_generated/dataModel";
 import { createAccount, invalidateSessions } from "@convex-dev/auth/server";
-import { internal } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import { requireUsuario, requirePropietaria } from "./authz";
 import { normalizarEmail } from "./emailUtils";
 
@@ -124,6 +124,123 @@ export const _buscarPorEmail = internalQuery({
       )
       .take(1);
     return enCuentas.length > 0;
+  },
+});
+
+/**
+ * Resuelve un correo a su fila de `users`.
+ *
+ * ⚠️ Busca PRIMERO por `authAccounts.providerAccountId` y solo después por
+ * `users.email`, y ese orden importa: el campo por el que el login identifica
+ * a alguien es el de la credencial, no el del perfil. En este proyecto los dos
+ * ya divergieron una vez de verdad (ver `authMaintenance.ts`), y mirar solo
+ * `users.email` haría que a una cuenta migrada no le llegara su propio código.
+ */
+async function usuarioPorEmail(
+  ctx: QueryCtx,
+  email: string,
+): Promise<Doc<"users"> | null> {
+  const cuenta = await ctx.db
+    .query("authAccounts")
+    .withIndex("providerAndAccountId", (q) =>
+      q.eq("provider", "password").eq("providerAccountId", email),
+    )
+    .first();
+  if (cuenta !== null) return await ctx.db.get(cuenta.userId);
+
+  return await ctx.db
+    .query("users")
+    .withIndex("email", (q) => q.eq("email", email))
+    .first();
+}
+
+/**
+ * GER-219 (E2) — Lo que `ResendOTP.sendVerificationRequest` necesita para
+ * decidir QUÉ correo mandar: el de invitación (con el código, para quien nunca
+ * tuvo contraseña) o el de recuperación (para quien sí la tiene).
+ *
+ * Devuelve `null` si el correo no corresponde a ninguna cuenta. Quien llama
+ * debe tratar ese caso como "recuperación", nunca como invitación: es interna,
+ * pero el criterio de no delatar qué correos existen se sostiene igual.
+ */
+export const _datosParaCorreo = internalQuery({
+  args: { email: v.string() },
+  returns: v.union(
+    v.object({
+      pendiente: v.boolean(),
+      name: v.optional(v.string()),
+      // Ya traducida acá: `ETIQUETA_ROL` es la única fuente de verdad de cómo
+      // se llama cada rol de cara a la gente, y duplicar ese mapa en el módulo
+      // del correo lo dejaría derivar en silencio.
+      etiquetaRol: v.optional(v.string()),
+    }),
+    v.null(),
+  ),
+  handler: async (ctx, args) => {
+    const u = await usuarioPorEmail(ctx, normalizarEmail(args.email));
+    if (u === null) return null;
+    return {
+      pendiente: u.passwordPendiente === true,
+      name: u.name,
+      etiquetaRol: u.rol === undefined ? undefined : ETIQUETA_ROL[u.rol],
+    };
+  },
+});
+
+/**
+ * GER-219 (E2) — Guarda cuándo vence el código que se acaba de enviar.
+ *
+ * La escribe `ResendOTP.sendVerificationRequest` (que sabe si el código es de
+ * invitación o de recuperación) y la lee el wrapper `authorize` de
+ * `convex/auth.ts` antes de dejar cambiar la contraseña. Ver el comentario de
+ * `codigoVenceEn` en el schema para por qué no basta con `provider.maxAge`.
+ */
+export const _fijarVencimientoCodigo = internalMutation({
+  args: { email: v.string(), venceEn: v.number() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const u = await usuarioPorEmail(ctx, normalizarEmail(args.email));
+    if (u === null) return null;
+    await ctx.db.patch(u._id, { codigoVenceEn: args.venceEn });
+    return null;
+  },
+});
+
+/**
+ * GER-219 (E2) — Lee el vencimiento del código vigente. La usa el wrapper
+ * `authorize` de `convex/auth.ts`.
+ */
+export const _vencimientoCodigo = internalQuery({
+  args: { email: v.string() },
+  returns: v.union(v.number(), v.null()),
+  handler: async (ctx, args) => {
+    const u = await usuarioPorEmail(ctx, normalizarEmail(args.email));
+    return u?.codigoVenceEn ?? null;
+  },
+});
+
+/**
+ * GER-219 (E2) — Qué le toca hacer a este correo en el login. PÚBLICA y SIN
+ * autenticación a propósito: se consulta antes de iniciar sesión.
+ *
+ * ⚠️ Diseñada para NO ser un oráculo de enumeración: `"normal"` cubre a la vez
+ * "cuenta con contraseña puesta" y "ese correo no existe". Las dos respuestas
+ * llevan a la misma pantalla (pedir contraseña) y al mismo error si falla, así
+ * que probar correos al azar no dice cuáles tienen acceso al CRM.
+ *
+ * Lo único que sí distingue es `"pendiente"`: revela que ese correo fue
+ * invitado y todavía no activó su cuenta. Es una fuga aceptada y deliberada —
+ * sin ella no hay forma de dejar de decirle "¿olvidaste tu contraseña?" a
+ * alguien que nunca tuvo una, que es justo el problema que esta entrega
+ * resuelve. No revela nada explotable: para entrar sigue haciendo falta el
+ * código que solo llega a ese buzón.
+ */
+export const estadoCuenta = query({
+  args: { email: v.string() },
+  returns: v.union(v.literal("pendiente"), v.literal("normal")),
+  handler: async (ctx, args) => {
+    const u = await usuarioPorEmail(ctx, normalizarEmail(args.email));
+    return u !== null && u.passwordPendiente === true ? "pendiente" : "normal";
   },
 });
 
@@ -386,6 +503,14 @@ export const eliminar = action({
  * Si el correo no sale, el alta NO se revierte: la persona queda dada de alta y
  * la dueña se entera para avisarle por otro medio (mismo criterio que
  * `recuperacion:solicitarCodigo`).
+ *
+ * GER-219 (E2) — El correo lo manda el MISMO flujo `reset` que usa la
+ * recuperación, en vez de un envío propio. Es lo que hace que la invitación
+ * lleve el código de 8 dígitos dentro: solo ese flujo genera un código válido
+ * (`authVerificationCodes`), y `ResendOTP.sendVerificationRequest` ve que la
+ * cuenta está `passwordPendiente` y manda el texto de bienvenida en lugar del
+ * de recuperación. Antes se mandaba un correo aparte que le pedía tocar
+ * "¿Olvidaste tu contraseña?" — falso para alguien que nunca tuvo una.
  */
 export const invitar = action({
   args: { nombre: v.string(), email: v.string(), rol: ROL },
@@ -394,10 +519,9 @@ export const invitar = action({
     ctx,
     args,
   ): Promise<{ id: Id<"users">; emailEnviado: boolean }> => {
-    const actor = await ctx.runQuery(
-      internal.usuarios._requirePropietariaActor,
-      {},
-    );
+    // Autoriza y nada más: quién invita ya no se interpola en el correo, porque
+    // el texto lo arma `ResendOTP` y ahí solo llega el destinatario.
+    await ctx.runQuery(internal.usuarios._requirePropietariaActor, {});
 
     const nombre = args.nombre.trim();
     if (nombre.length === 0) throw new ConvexError("El nombre es obligatorio");
@@ -417,12 +541,26 @@ export const invitar = action({
       profile: { email, name: nombre, rol: args.rol, passwordPendiente: true },
     });
 
-    const emailEnviado = await enviarInvitacion({
-      para: email,
-      nombre,
-      rol: args.rol,
-      invitadaPor: actor.name,
-    });
+    // Dispara el código por el flujo `reset`. Va DESPUÉS de `createAccount` y
+    // no puede ir antes: `reset` exige que la credencial ya exista
+    // (`dist/providers/Password.js:92-95` hace `retrieveAccount` primero).
+    //
+    // Cualquier fallo se reporta como "no salió el correo" y NO revierte el
+    // alta: la persona ya está en el equipo y la dueña puede reenviarle el
+    // código, mientras que deshacer el alta dejaría una cuenta a medio crear.
+    let emailEnviado = true;
+    try {
+      await ctx.runAction(api.auth.signIn, {
+        provider: "password",
+        params: { email, flow: "reset" },
+      });
+    } catch (err) {
+      console.error(
+        "GER-219: alta creada pero no se pudo enviar la invitación:",
+        err instanceof Error ? err.message : String(err),
+      );
+      emailEnviado = false;
+    }
 
     return { id: user._id, emailEnviado };
   },
@@ -435,123 +573,4 @@ export const invitar = action({
  */
 function secretoAleatorio(): string {
   return `${crypto.randomUUID()}${crypto.randomUUID()}`;
-}
-
-/**
- * Escapa lo que va dentro del HTML del correo.
- *
- * Hace falta acá y no en `ResendOTP.ts`: aquel solo interpola su propio código
- * numérico, y este interpola NOMBRES que escribió una persona. Sin escapar, un
- * nombre con `<`, `>` o `&` rompe el marcado o mete HTML ajeno en el mensaje.
- * El `&` va primero o volvería a escapar lo que escapan los demás.
- */
-function escapeHtml(texto: string): string {
-  return texto
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-const MAX_CUERPO_ERROR = 300;
-const URL_RESEND = "https://api.resend.com/emails";
-const TIMEOUT_MS = 10_000;
-
-/**
- * Correo de bienvenida. Devuelve si salió o no; nunca lanza, porque un fallo de
- * envío no puede tumbar un alta que ya se hizo.
- *
- * ⚠️ NO lleva ningún enlace con token de un solo uso, a propósito. Los
- * antivirus y los gateways de correo corporativos PRE-VISITAN los enlaces para
- * escanearlos, así que un "magic link" quedaría consumido antes de que la
- * persona llegara a tocarlo y el clic de verdad fallaría con "enlace ya usado".
- * Acá solo hay un enlace plano al login (visitarlo no gasta nada) y el código
- * viaja aparte, como texto para teclear.
- */
-async function enviarInvitacion(datos: {
-  para: string;
-  nombre: string;
-  rol: Rol;
-  invitadaPor?: string;
-}): Promise<boolean> {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    console.error("GER-219: falta la variable de entorno RESEND_API_KEY");
-    return false;
-  }
-  const siteUrl = process.env.SITE_URL;
-  if (!siteUrl) {
-    console.error("GER-219: falta la variable de entorno SITE_URL");
-    return false;
-  }
-
-  const urlLogin = `${siteUrl.replace(/\/$/, "")}/login`;
-  const quien = datos.invitadaPor ?? "La dueña del CRM";
-  const etiquetaRol = ETIQUETA_ROL[datos.rol];
-
-  const texto = [
-    `Hola ${datos.nombre}:`,
-    "",
-    `${quien} te dio de alta en Vibe CRM como "${etiquetaRol}".`,
-    "",
-    "Para entrar por primera vez tenés que crear tu contraseña:",
-    `  1. Abrí ${urlLogin}`,
-    '  2. Tocá "¿Olvidaste tu contraseña?" y escribí este correo',
-    "  3. Te llega un código de 8 dígitos para elegir tu contraseña",
-    "",
-    "Si no esperabas este mensaje, podés ignorarlo.",
-  ].join("\n");
-
-  const html = [
-    `<p>Hola ${escapeHtml(datos.nombre)}:</p>`,
-    `<p>${escapeHtml(quien)} te dio de alta en Vibe CRM como <strong>${escapeHtml(etiquetaRol)}</strong>.</p>`,
-    "<p>Para entrar por primera vez tenés que crear tu contraseña:</p>",
-    "<ol>",
-    `<li>Abrí <a href="${escapeHtml(urlLogin)}">${escapeHtml(urlLogin)}</a></li>`,
-    "<li>Tocá «¿Olvidaste tu contraseña?» y escribí este correo</li>",
-    "<li>Te llega un código de 8 dígitos para elegir tu contraseña</li>",
-    "</ol>",
-    "<p>Si no esperabas este mensaje, podés ignorarlo.</p>",
-  ].join("");
-
-  try {
-    const respuesta = await fetch(URL_RESEND, {
-      method: "POST",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: "Vibe CRM <no-reply@red-24.com>",
-        to: [datos.para],
-        subject: "Te dieron de alta en Vibe CRM",
-        text: texto,
-        html,
-      }),
-    });
-
-    // `fetch` NO lanza en 4xx/5xx: sin esto, un rechazo de Resend se tomaría
-    // por envío correcto y diríamos que mandamos un correo que nunca salió.
-    if (!respuesta.ok) {
-      const cuerpo = (await respuesta.text().catch(() => "(sin cuerpo)")).slice(
-        0,
-        MAX_CUERPO_ERROR,
-      );
-      console.error(
-        `GER-219: Resend rechazó la invitación (${respuesta.status}): ${cuerpo}`,
-      );
-      return false;
-    }
-    return true;
-  } catch (causa) {
-    // Solo el mensaje, recortado: nunca la traza ni las cabeceras (ahí va la
-    // API key). `fetch` lanza ante DNS, TLS, red caída o el timeout de arriba.
-    const detalle = (
-      causa instanceof Error ? causa.message : String(causa)
-    ).slice(0, MAX_CUERPO_ERROR);
-    console.error(`GER-219: no se pudo contactar con Resend: ${detalle}`);
-    return false;
-  }
 }

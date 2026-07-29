@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthActions } from "@convex-dev/auth/react";
-import { useAction, useConvexAuth } from "convex/react";
+import { useAction, useConvex, useConvexAuth } from "convex/react";
 import { AlertCircle, ArrowLeft, Eye, EyeOff, MailCheck } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -18,13 +18,26 @@ const GOOGLE_INTENTO_KEY = "vibecrm:googleIntento";
  * GER-239 — Mensaje deliberadamente ambiguo: se muestra IGUAL exista o no la
  * cuenta. Decir "ese correo no está registrado" convertiría el login en un
  * oráculo de qué correos tienen acceso al CRM.
+ *
+ * Solo se usa en el camino de RECUPERACIÓN. La activación de una invitación no
+ * lo necesita: para llegar ahí el servidor ya confirmó que esa cuenta existe y
+ * está pendiente, así que fingir ambigüedad solo confundiría.
  */
 const MENSAJE_NEUTRO =
   "Si el correo corresponde a una cuenta con acceso, te enviamos un código. Revisá tu bandeja y también el spam.";
 
 const MIN_PASSWORD = 8;
 
-type Paso = "login" | "pedir-codigo" | "verificar";
+/**
+ * GER-219 (E2) — Los tres pasos del login.
+ *
+ * `correo` va primero y es el cambio central de esta entrega: hasta saber qué
+ * correo es, no se puede saber si a esa persona le corresponde una contraseña
+ * (ya la tiene) o un código (fue invitada y nunca tuvo una). Pedir las dos
+ * cosas juntas obligaba a decirle "¿olvidaste tu contraseña?" a quien nunca
+ * tuvo ninguna.
+ */
+type Paso = "correo" | "password" | "verificar";
 
 function GoogleIcon() {
   return (
@@ -51,6 +64,7 @@ function GoogleIcon() {
 
 export default function LoginPage() {
   const { signIn } = useAuthActions();
+  const convex = useConvex();
   const solicitarCodigo = useAction(api.recuperacion.solicitarCodigo);
   const { isAuthenticated, isLoading } = useConvexAuth();
   const router = useRouter();
@@ -58,11 +72,19 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
   const [googleSubmitting, setGoogleSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [paso, setPaso] = useState<Paso>("login");
+  const [paso, setPaso] = useState<Paso>("correo");
   const [aviso, setAviso] = useState<string | null>(null);
-  // El correo del paso 2 se reutiliza en el 3: la librería exige que coincida
-  // con el del `signIn` inicial (authorize de convex/ResendOTP.ts).
-  const [emailReset, setEmailReset] = useState("");
+  // El correo del primer paso se arrastra al resto: la librería exige que el
+  // de la verificación coincida con el del `signIn` inicial (authorize de
+  // convex/ResendOTP.ts).
+  const [email, setEmail] = useState("");
+  /**
+   * ¿El código que se mandó es de ACTIVACIÓN (nunca tuvo contraseña) o de
+   * recuperación? Solo cambia los textos: el formulario y la llamada son los
+   * mismos. Importa porque los vencimientos son distintos (24 h contra 15 min)
+   * y decir el que no es haría que la gente descarte un código que sigue vivo.
+   */
+  const [esActivacion, setEsActivacion] = useState(false);
 
   function irA(destino: Paso) {
     setError(null);
@@ -71,16 +93,103 @@ export default function LoginPage() {
     setPaso(destino);
   }
 
-  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+  /**
+   * Paso 1 — Solo el correo. Decide a dónde va la persona:
+   *
+   *   invitada sin activar  → se le manda el código y salta directo a elegir
+   *                           contraseña, sin pasar por ninguna pantalla que
+   *                           hable de contraseñas olvidadas
+   *   cualquier otro caso   → pantalla de contraseña
+   *
+   * ⚠️ "cualquier otro caso" incluye a propósito los correos que NO existen:
+   * `estadoCuenta` devuelve `"normal"` tanto para una cuenta con contraseña
+   * como para uno inventado, y los dos terminan en la misma pantalla con el
+   * mismo error. Así el paso del correo no delata quién tiene acceso al CRM.
+   */
+  async function onCorreo(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
     const form = new FormData(e.currentTarget);
-    // Solo iniciamos sesión: nunca exponemos el flujo de registro en la UI.
-    form.set("flow", "signIn");
-    form.set("email", normalizarEmail(String(form.get("email") ?? "")));
+    const correo = normalizarEmail(String(form.get("email") ?? ""));
+    setSubmitting(true);
+
+    let estado: "pendiente" | "normal";
+    try {
+      estado = await convex.query(api.usuarios.estadoCuenta, { email: correo });
+    } catch {
+      setError("No pudimos continuar. Probá de nuevo en unos segundos.");
+      setSubmitting(false);
+      return;
+    }
+
+    setEmail(correo);
+
+    if (estado === "normal") {
+      setSubmitting(false);
+      irA("password");
+      return;
+    }
+
+    // Invitación sin activar: el código ya salió con el correo de bienvenida,
+    // pero se manda uno nuevo igual. El de la invitación puede haber vencido
+    // (dura 24 h) y hacerla volver al buzón a buscar cuál de los dos sirve es
+    // peor que mandarle uno fresco ahora, que es el único que va a estar vivo.
+    await enviarCodigo(correo, true);
+  }
+
+  /**
+   * Manda el código y lleva al paso de verificación. Compartido por la
+   * activación y la recuperación: la única diferencia son los textos.
+   *
+   * Se llama a nuestra acción, NO a `signIn` directamente, porque devuelve un
+   * VALOR en vez de lanzar: la marca del fallo de envío no sobrevive el viaje
+   * al navegador dentro de un error. El detalle, en convex/recuperacion.ts.
+   */
+  async function enviarCodigo(correo: string, activacion: boolean) {
+    setSubmitting(true);
+    let resultado: "enviado" | "fallo_envio";
+    try {
+      resultado = await solicitarCodigo({ email: correo });
+    } catch {
+      // Solo se llega acá si la acción ni siquiera pudo ejecutarse (por ejemplo
+      // sin red en el navegador): tampoco se envió nada.
+      resultado = "fallo_envio";
+    }
+
+    // Un fallo real de envío SÍ se muestra: callarlo diría que mandamos un
+    // código que nunca salió. El correo inexistente, en cambio, devuelve
+    // "enviado" desde el servidor a propósito.
+    if (resultado === "fallo_envio") {
+      setError("No pudimos enviar el correo. Probá de nuevo en unos minutos.");
+      setSubmitting(false);
+      return;
+    }
+
+    setEsActivacion(activacion);
+    setShowPass(false);
+    setError(null);
+    setPaso("verificar");
+    setAviso(
+      activacion
+        ? `Te enviamos un código nuevo a ${correo}. Revisá tu bandeja y también el spam.`
+        : MENSAJE_NEUTRO,
+    );
+    setSubmitting(false);
+  }
+
+  /** Paso 2 — Contraseña de quien ya tiene una. */
+  async function onPassword(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setError(null);
+    const form = new FormData(e.currentTarget);
     setSubmitting(true);
     try {
-      await signIn("password", form);
+      // Solo iniciamos sesión: nunca exponemos el flujo de registro en la UI.
+      await signIn("password", {
+        email,
+        password: String(form.get("password") ?? ""),
+        flow: "signIn",
+      });
       router.replace("/hoy");
     } catch {
       setError("Correo o contraseña incorrectos.");
@@ -88,39 +197,7 @@ export default function LoginPage() {
     }
   }
 
-  async function onPedirCodigo(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setError(null);
-    const form = new FormData(e.currentTarget);
-    const email = normalizarEmail(String(form.get("email") ?? ""));
-    setSubmitting(true);
-    // Se llama a nuestra acción, NO a `signIn` directamente, porque devuelve un
-    // VALOR en vez de lanzar: la marca del fallo de envío no sobrevive el viaje
-    // al navegador dentro de un error. El detalle, en convex/recuperacion.ts.
-    //
-    // Un fallo real de envío SÍ se muestra: callarlo diría que mandamos un
-    // código que nunca salió. El correo inexistente, en cambio, devuelve
-    // "enviado" desde el servidor a propósito, para no revelar qué correos
-    // tienen acceso.
-    let resultado: "enviado" | "fallo_envio";
-    try {
-      resultado = await solicitarCodigo({ email });
-    } catch {
-      // Solo se llega acá si la acción ni siquiera pudo ejecutarse (por ejemplo
-      // sin red en el navegador): tampoco se envió nada.
-      resultado = "fallo_envio";
-    }
-    if (resultado === "fallo_envio") {
-      setError("No pudimos enviar el correo. Probá de nuevo en unos minutos.");
-      setSubmitting(false);
-      return;
-    }
-    setEmailReset(email);
-    setPaso("verificar");
-    setAviso(MENSAJE_NEUTRO);
-    setSubmitting(false);
-  }
-
+  /** Paso 3 — Código + contraseña nueva. Sirve para activar y para recuperar. */
   async function onVerificar(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
@@ -149,7 +226,7 @@ export default function LoginPage() {
     setSubmitting(true);
     try {
       await signIn("password", {
-        email: emailReset,
+        email,
         code,
         newPassword,
         flow: "reset-verification",
@@ -206,6 +283,22 @@ export default function LoginPage() {
     </div>
   );
 
+  const ojoContrasena = (
+    <button
+      type="button"
+      onClick={() => setShowPass((v) => !v)}
+      aria-label={showPass ? "Ocultar contraseña" : "Mostrar contraseña"}
+      aria-pressed={showPass}
+      className="absolute right-2 top-[34px] flex size-9 items-center justify-center rounded-md text-text-subtle hover:bg-surface-2"
+    >
+      {showPass ? (
+        <EyeOff className="size-[18px]" aria-hidden />
+      ) : (
+        <Eye className="size-[18px]" aria-hidden />
+      )}
+    </button>
+  );
+
   return (
     <main className="flex min-h-dvh items-center justify-center bg-bg px-4">
       <div className="w-full max-w-[400px]">
@@ -217,14 +310,14 @@ export default function LoginPage() {
         </div>
 
         <div className="rounded-xl border border-border bg-surface p-6 shadow-sm">
-          {paso === "login" && (
+          {paso === "correo" && (
             <>
               <h1 className="text-xl font-semibold text-text">Inicia sesión</h1>
               <p className="mt-1 text-sm text-text-muted">
-                Entra para ver tus tareas del día.
+                Escribí tu correo para continuar.
               </p>
 
-              <form onSubmit={onSubmit} className="mt-5 flex flex-col gap-4">
+              <form onSubmit={onCorreo} className="mt-5 flex flex-col gap-4">
                 {bloqueError}
 
                 <Input
@@ -235,46 +328,12 @@ export default function LoginPage() {
                   autoFocus
                   required
                   placeholder="tu@correo.com"
+                  defaultValue={email}
                 />
 
-                <div className="relative">
-                  <Input
-                    label="Contraseña"
-                    name="password"
-                    type={showPass ? "text" : "password"}
-                    autoComplete="current-password"
-                    required
-                    placeholder="••••••••"
-                    className="pr-11"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPass((v) => !v)}
-                    aria-label={
-                      showPass ? "Ocultar contraseña" : "Mostrar contraseña"
-                    }
-                    aria-pressed={showPass}
-                    className="absolute right-2 top-[34px] flex size-9 items-center justify-center rounded-md text-text-subtle hover:bg-surface-2"
-                  >
-                    {showPass ? (
-                      <EyeOff className="size-[18px]" aria-hidden />
-                    ) : (
-                      <Eye className="size-[18px]" aria-hidden />
-                    )}
-                  </button>
-                </div>
-
                 <Button type="submit" loading={submitting} className="w-full">
-                  Entrar
+                  Continuar
                 </Button>
-
-                <button
-                  type="button"
-                  onClick={() => irA("pedir-codigo")}
-                  className="text-center text-[13px] text-text-muted hover:text-text"
-                >
-                  ¿Olvidaste tu contraseña?
-                </button>
               </form>
 
               <div className="my-4 flex items-center gap-3" aria-hidden>
@@ -296,43 +355,54 @@ export default function LoginPage() {
             </>
           )}
 
-          {paso === "pedir-codigo" && (
+          {paso === "password" && (
             <>
               <h1 className="text-xl font-semibold text-text">
-                Recuperar contraseña
+                Escribí tu contraseña
               </h1>
               <p className="mt-1 text-sm text-text-muted">
-                Escribí tu correo y te enviamos un código para crear una
-                contraseña nueva.
+                Entrando como <span className="text-text">{email}</span>.
               </p>
 
-              <form
-                onSubmit={onPedirCodigo}
-                className="mt-5 flex flex-col gap-4"
-              >
+              <form onSubmit={onPassword} className="mt-5 flex flex-col gap-4">
                 {bloqueError}
 
-                <Input
-                  label="Correo"
-                  name="email"
-                  type="email"
-                  autoComplete="email"
-                  autoFocus
-                  required
-                  placeholder="tu@correo.com"
-                />
+                <div className="relative">
+                  <Input
+                    label="Contraseña"
+                    name="password"
+                    type={showPass ? "text" : "password"}
+                    autoComplete="current-password"
+                    autoFocus
+                    required
+                    placeholder="••••••••"
+                    className="pr-11"
+                  />
+                  {ojoContrasena}
+                </div>
 
                 <Button type="submit" loading={submitting} className="w-full">
-                  Enviar código
+                  Entrar
                 </Button>
+
+                {/* Acá SÍ corresponde: en este paso solo cae quien tiene (o
+                    debería tener) una contraseña puesta. */}
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => enviarCodigo(email, false)}
+                  className="text-center text-[13px] text-text-muted hover:text-text disabled:opacity-50"
+                >
+                  ¿Olvidaste tu contraseña?
+                </button>
 
                 <button
                   type="button"
-                  onClick={() => irA("login")}
+                  onClick={() => irA("correo")}
                   className="flex items-center justify-center gap-1.5 text-[13px] text-text-muted hover:text-text"
                 >
                   <ArrowLeft className="size-4" aria-hidden />
-                  Volver a iniciar sesión
+                  Usar otro correo
                 </button>
               </form>
             </>
@@ -341,11 +411,22 @@ export default function LoginPage() {
           {paso === "verificar" && (
             <>
               <h1 className="text-xl font-semibold text-text">
-                Escribí el código
+                {esActivacion ? "Elegí tu contraseña" : "Escribí el código"}
               </h1>
               <p className="mt-1 text-sm text-text-muted">
-                Te lo enviamos a <span className="text-text">{emailReset}</span>.
-                Vence en 15 minutos.
+                {esActivacion ? (
+                  <>
+                    Te dieron acceso al CRM. Escribí el código que te llegó a{" "}
+                    <span className="text-text">{email}</span> y elegí la
+                    contraseña con la que vas a entrar. El código vence en 24
+                    horas.
+                  </>
+                ) : (
+                  <>
+                    Te lo enviamos a <span className="text-text">{email}</span>.
+                    Vence en 15 minutos.
+                  </>
+                )}
               </p>
 
               <form onSubmit={onVerificar} className="mt-5 flex flex-col gap-4">
@@ -354,10 +435,7 @@ export default function LoginPage() {
                     role="status"
                     className="flex items-start gap-2 rounded-md border border-border bg-surface-2 px-3 py-2.5 text-[13px] text-text-muted"
                   >
-                    <MailCheck
-                      className="mt-0.5 size-4 shrink-0"
-                      aria-hidden
-                    />
+                    <MailCheck className="mt-0.5 size-4 shrink-0" aria-hidden />
                     {aviso}
                   </div>
                 )}
@@ -378,7 +456,7 @@ export default function LoginPage() {
 
                 <div className="relative">
                   <Input
-                    label="Contraseña nueva"
+                    label={esActivacion ? "Tu contraseña" : "Contraseña nueva"}
                     name="newPassword"
                     type={showPass ? "text" : "password"}
                     autoComplete="new-password"
@@ -387,21 +465,7 @@ export default function LoginPage() {
                     className="pr-11"
                     helper={`Mínimo ${MIN_PASSWORD} caracteres.`}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowPass((v) => !v)}
-                    aria-label={
-                      showPass ? "Ocultar contraseña" : "Mostrar contraseña"
-                    }
-                    aria-pressed={showPass}
-                    className="absolute right-2 top-[34px] flex size-9 items-center justify-center rounded-md text-text-subtle hover:bg-surface-2"
-                  >
-                    {showPass ? (
-                      <EyeOff className="size-[18px]" aria-hidden />
-                    ) : (
-                      <Eye className="size-[18px]" aria-hidden />
-                    )}
-                  </button>
+                  {ojoContrasena}
                 </div>
 
                 <Input
@@ -414,16 +478,16 @@ export default function LoginPage() {
                 />
 
                 <Button type="submit" loading={submitting} className="w-full">
-                  Cambiar contraseña y entrar
+                  {esActivacion ? "Entrar al CRM" : "Cambiar contraseña y entrar"}
                 </Button>
 
                 <button
                   type="button"
-                  onClick={() => irA("pedir-codigo")}
+                  onClick={() => irA("correo")}
                   className="flex items-center justify-center gap-1.5 text-[13px] text-text-muted hover:text-text"
                 >
                   <ArrowLeft className="size-4" aria-hidden />
-                  Usar otro correo o pedir un código nuevo
+                  Volver al inicio
                 </button>
               </form>
             </>
