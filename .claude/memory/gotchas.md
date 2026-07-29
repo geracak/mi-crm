@@ -88,3 +88,73 @@ claro desde la base, hace falta el correo real.
 proyecto sin UI, usar este patrón en vez de intentar simular tokens JWT a
 mano. Borrar siempre las cuentas de prueba creadas (`usuarios:eliminar`) al
 terminar, para no dejar basura en el deployment de dev.
+
+---
+
+## 2026-07-29 · Mergear a master NO despliega Convex: producción quedó rota
+
+**Categoría:** despliegue / infraestructura — **BLOQUEANTE, llegó a producción**
+
+**Qué pasó:** tras mergear el PR de GER-219, `/equipo` dejó de cargar en
+producción (`red-24.com`). El navegador mostraba la pantalla de Chrome «This
+page couldn't load» y ni siquiera abría F12: se moría el proceso del renderer.
+
+Los logs HTTP de Railway mostraban `GET /equipo 200` en 90-280 ms, o sea que
+el servidor respondía perfecto. El diagnóstico salió de comparar las funciones
+desplegadas en cada entorno:
+
+```
+$ npx convex function-spec --prod | grep usuarios
+usuarios.js:actual      ← vieja, existe
+usuarios.js:listar      ← vieja, existe
+                        ← NO estaban equipo, invitar, actualizar ni eliminar
+```
+
+**Causa raíz:** `railway.json` tiene `buildCommand: "npm run build"`, que es
+solo `next build`. **Eso no despliega Convex.** Los dos despliegues son
+independientes: Railway sirve el frontend y Convex vive aparte. Durante la
+verificación de la issue solo se corrió `npx convex dev --once`, que despliega
+al deployment de **dev** (`kindred-elephant-599`), nunca a **prod**
+(`affable-vulture-315`).
+
+Resultado: Railway sirvió el frontend nuevo, que llama a `usuarios:equipo`,
+contra un backend que no tenía esa función. La página renderiza bien en el
+servidor (su `page.tsx` solo usa `usuarios:actual`, que sí existía — de ahí el
+200 engañoso en los logs), pero al hidratar, el cliente de Convex pide una
+función inexistente y entra en un ciclo de reconexión que termina tumbando la
+pestaña por consumo de memoria.
+
+**Por qué el síntoma despista:** un 200 en los logs del host NO significa que
+la página funcione. Todo lo que pasa después de la hidratación (o sea, todas
+las queries de Convex) es invisible para los logs HTTP de Railway.
+
+**Regla preventiva:** cualquier cambio que toque `convex/` necesita su propio
+despliegue a producción. Antes de decir que algo está listo para probar en el
+servidor:
+
+```bash
+npx convex function-spec --prod | grep -o '"identifier": "[^"]*"' | sort
+```
+
+y confirmar que las funciones nuevas están ahí. `npx convex deploy --dry-run
+--yes` valida el push sin aplicarlo (avisa si borra índices y valida el schema
+contra los datos reales de prod).
+
+**Arreglo estructural (pendiente de aplicar):** mover el despliegue de Convex
+dentro del build de Railway, que es el patrón que documenta Convex para hosts
+externos:
+
+```json
+// railway.json
+"buildCommand": "npx convex deploy --cmd 'npm run build'"
+```
+
+Despliega el backend ANTES de construir el frontend, así que es imposible que
+salga a producción un frontend que llame funciones que el backend no tiene.
+Requiere `CONVEX_DEPLOY_KEY` en las variables de Railway (dashboard de Convex
+→ deployment de producción → *Deployment Settings* → pestaña *General* →
+botón *Generate Production Deploy Key*, con el permiso `deployment:deploy`).
+
+**Verificación:** `/equipo` volvió a funcionar tras `npx convex deploy --yes`,
+confirmado ejecutando la query real contra prod:
+`npx convex run usuarios:equipo '{}' --prod --identity '{"subject":"<id>|x"}'`.
