@@ -147,7 +147,7 @@ export function EquipoClient() {
                   {p.email ?? "Sin correo"}
                 </span>
               </div>
-              <Badge status={ROL_BADGE[p.rol]} className="hidden shrink-0 sm:inline-flex">
+              <Badge status={ROL_BADGE[p.rol]} className="shrink-0">
                 {ROL_LABEL[p.rol]}
               </Badge>
               <IconButton
