@@ -55,6 +55,22 @@ export default defineSchema({
     // `undefined` cuenta como `false`: los usuarios que ya existían (el seed)
     // tienen su contraseña puesta, así que no hace falta migrarlos.
     passwordPendiente: v.optional(v.boolean()),
+    // ⚠️ VESTIGIAL — GER-242 lo dejó de leer y de escribir. NO usarlo.
+    //
+    // Era un ESPEJO del vencimiento del código, guardado en una transacción
+    // distinta de la que lo crea, y su ausencia se interpretaba como "sin
+    // restricción". Cualquier fallo entre las dos escrituras dejaba un código
+    // de recuperación heredando el tope exterior de 24 h en vez de sus 15
+    // minutos: fail-open en un control de seguridad. Ahora la ventana se DERIVA
+    // al verificar, desde `authVerificationCodes._creationTime` y
+    // `passwordPendiente` (ver `convex/auth.ts` y `emailUtils.ts`).
+    //
+    // Sigue declarado porque hay documentos en producción que lo tienen y
+    // quitarlo del schema los invalidaría. Se limpian sus valores con
+    // `authMaintenance:limpiarEspejoVencimiento` y, una vez limpios, retirar el
+    // campo es un cambio aparte.
+    //
+    // Comentario original, conservado para entender de dónde venía:
     // GER-219 (E2) — cuándo vence el código de 8 dígitos que se le mandó por
     // última vez a esta persona.
     //

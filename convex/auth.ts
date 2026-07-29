@@ -3,10 +3,10 @@ import { Password } from "@convex-dev/auth/providers/Password";
 import Google from "@auth/core/providers/google";
 import { ConvexError } from "convex/values";
 import { internal } from "./_generated/api";
-import type { DataModel, Id } from "./_generated/dataModel";
+import type { DataModel, Doc, Id } from "./_generated/dataModel";
 import type { ActionCtx, MutationCtx } from "./_generated/server";
 import { ResendOTP } from "./ResendOTP";
-import { normalizarEmail } from "./emailUtils";
+import { normalizarEmail, ventanaCodigoMs } from "./emailUtils";
 import { origenesPermitidos, resolverDestino } from "./redirectOrigins";
 
 /**
@@ -25,6 +25,36 @@ const REGISTRO_NO_PERMITIDO = "Registro no permitido";
  * vez de volver a teclear el mismo.
  */
 const CODIGO_VENCIDO = "El código venció. Pedí uno nuevo.";
+
+/**
+ * GER-242 — Quien entra con Google ya tiene acceso: apagar la marca de
+ * "invitación sin activar".
+ *
+ * ⚠️ Por qué hace falta: alguien invitada cuyo correo coincide con su cuenta de
+ * Google puede entrar por ahí sin pasar nunca por el código. Entraba bien, pero
+ * `passwordPendiente` quedaba encendido PARA SIEMPRE, y a partir de ahí
+ * `estadoCuenta` la seguía tratando como invitación sin activar: el login le
+ * ofrecía "Te dieron acceso al CRM, escribí el código" a alguien que hacía rato
+ * que entraba sin problemas.
+ *
+ * Se llama SOLO desde autenticaciones de Google que ya pasaron todas las
+ * comprobaciones de acceso — nunca antes de validarlas. Y solo escribe si la
+ * marca está encendida, así que un login normal no genera escritura.
+ *
+ * La marca significa "la contraseña la puso el sistema, no la persona", y sigue
+ * siendo cierto: no tiene una propia. Pero lo que gobierna es "¿hay que mandarla
+ * a activar?", y la respuesta pasa a ser no. Si después quiere contraseña, la
+ * consigue por "¿Olvidaste tu contraseña?" con la ventana normal de 15 minutos.
+ */
+async function apagarPendienteSiGoogle(
+  ctx: MutationCtx,
+  providerId: string,
+  usuario: Doc<"users">,
+): Promise<void> {
+  if (providerId !== "google") return;
+  if (usuario.passwordPendiente !== true) return;
+  await ctx.db.patch(usuario._id, { passwordPendiente: false });
+}
 
 const passwordBase = Password<DataModel>({
   // GER-239: proveedor del código de un solo uso para el flujo `reset`.
@@ -159,27 +189,48 @@ const PasswordEndurecido = {
           ? { ...params, email: normalizarEmail(email) }
           : params;
 
-      // 2.bis) GER-219 (E2) — Vencimiento REAL del código.
+      // 2.bis) GER-242 — Vencimiento REAL del código, DERIVADO.
       //
       // La librería solo admite un vencimiento por proveedor y acá hacen falta
-      // dos (invitación 24 h, recuperación 15 min), así que `maxAge` quedó en
-      // el mayor y el que corresponde a cada código se guardó al enviarlo, en
-      // `users.codigoVenceEn` (ver `ResendOTP.ts` y el schema).
+      // dos (invitación 24 h, recuperación 15 min), así que `maxAge` quedó en el
+      // mayor de los dos como tope exterior.
+      //
+      // ⚠️ El que corresponde a cada código NO se guarda en ningún lado. Antes
+      // se guardaba en `users.codigoVenceEn` y esa era la falla: un espejo
+      // escrito en otra transacción, cuya AUSENCIA se interpretaba como "sin
+      // restricción". Cualquier fallo entre crear el código y escribir el
+      // espejo dejaba un código de recuperación heredando las 24 h del tope
+      // exterior — 96 veces su ventana. Fail-open, que es la peor forma de
+      // fallar en un control de seguridad.
+      //
+      // Ahora se calcula acá mismo, a partir de dos cosas que no pueden
+      // desincronizarse porque ninguna se escribe para esto: cuándo nació la
+      // fila del código y si la cuenta está en activación.
       //
       // ⚠️ Va ANTES de `authorizeOriginal`: ese es el que llama a
       // `modifyAccountCredentials` y cambia la contraseña de verdad
       // (`dist/providers/Password.js:118-122`). Comprobarlo después dejaría la
       // contraseña ya cambiada por un código vencido.
-      //
-      // `null` = no hay vencimiento propio guardado; manda solo el tope de la
-      // librería. Pasa con códigos emitidos antes de esta entrega, que con el
-      // `maxAge` viejo de 15 minutos ya vencieron todos igual.
       if (params.flow === "reset-verification" && typeof email === "string") {
-        const venceEn = await ctx.runQuery(
-          internal.usuarios._vencimientoCodigo,
-          { email: normalizarEmail(email) },
-        );
-        if (venceEn !== null && Date.now() > venceEn) {
+        const estado = await ctx.runQuery(internal.usuarios._estadoCodigo, {
+          email: normalizarEmail(email),
+        });
+
+        // Ambigüedad de datos (varias cuentas con el mismo identificador, o
+        // varios códigos para una cuenta): no se elige ninguno al azar y no se
+        // deja cambiar la contraseña. Mismo criterio que el resto de las
+        // guardas del proyecto.
+        if (estado.tipo === "ambiguo") {
+          throw new ConvexError(CODIGO_VENCIDO);
+        }
+
+        // `sin-codigo` no se rechaza acá: sin fila no hay nada que verificar y
+        // `authorizeOriginal` va a fallar igual. Es fail-closed por
+        // construcción, no por convención.
+        if (
+          estado.tipo === "ok" &&
+          Date.now() - estado.creadoEn > ventanaCodigoMs(estado.pendiente)
+        ) {
           throw new ConvexError(CODIGO_VENCIDO);
         }
       }
@@ -298,6 +349,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
             "Esta cuenta ya no tiene acceso. Contactá a la persona dueña del CRM.",
           );
         }
+        await apagarPendienteSiGoogle(ctx, args.provider.id, usuario);
         return args.existingUserId;
       }
 
@@ -332,6 +384,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
             "Esta cuenta de Google no tiene acceso. Contactá a la persona dueña del CRM.",
           );
         }
+        await apagarPendienteSiGoogle(ctx, args.provider.id, existente);
         return existente._id; // vincula, no crea
       }
 

@@ -8,9 +8,14 @@ import { AlertCircle, ArrowLeft, Eye, EyeOff, MailCheck } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { api } from "@/lib/convexApi";
+import { mensajeError } from "@/lib/errores";
 // Módulo PURO de convex/ (sin imports de servidor): es seguro traerlo al
 // bundle del navegador. Ver la cabecera de convex/emailUtils.ts.
-import { normalizarEmail } from "../../../../convex/emailUtils";
+import {
+  normalizarEmail,
+  ETIQUETA_VENTANA_INVITACION,
+  ETIQUETA_VENTANA_RECUPERACION,
+} from "../../../../convex/emailUtils";
 
 const GOOGLE_INTENTO_KEY = "vibecrm:googleIntento";
 
@@ -162,7 +167,7 @@ export default function LoginPage() {
    */
   async function enviarCodigo(correo: string, activacion: boolean) {
     setSubmitting(true);
-    let resultado: "enviado" | "fallo_envio";
+    let resultado: "enviado" | "fallo_envio" | "frenado";
     try {
       resultado = await solicitarCodigo({ email: correo });
     } catch {
@@ -176,6 +181,17 @@ export default function LoginPage() {
     // "enviado" desde el servidor a propósito.
     if (resultado === "fallo_envio") {
       setError("No pudimos enviar el correo. Probá de nuevo en unos minutos.");
+      setSubmitting(false);
+      return;
+    }
+
+    // GER-242 — Solo llega en activación (ver `solicitarCodigo`). Se avisa en
+    // vez de decir "te enviamos uno nuevo": el correo NO salió, y dejar a
+    // alguien esperándolo es peor que pedirle que aguarde unos segundos.
+    if (resultado === "frenado") {
+      setError(
+        "Acabamos de enviarte uno. Esperá un momento antes de pedir otro.",
+      );
       setSubmitting(false);
       return;
     }
@@ -247,8 +263,19 @@ export default function LoginPage() {
         flow: "reset-verification",
       });
       router.replace("/hoy");
-    } catch {
-      setError("Código incorrecto o vencido. Pedí uno nuevo si hace falta.");
+    } catch (e) {
+      // GER-242 — El backend distingue "venció" de "es incorrecto"
+      // (`CODIGO_VENCIDO` en convex/auth.ts) y esa diferencia le importa a quien
+      // está del otro lado: con uno hay que pedir otro código, con el otro basta
+      // con volver a tipear. `mensajeError` muestra el texto del ConvexError
+      // cuando llega, y si no, el genérico de siempre — que sigue cubriendo
+      // ambos casos sin mentir.
+      setError(
+        mensajeError(
+          e,
+          "Código incorrecto o vencido. Pedí uno nuevo si hace falta.",
+        ),
+      );
       setSubmitting(false);
     }
   }
@@ -433,13 +460,13 @@ export default function LoginPage() {
                   <>
                     Te dieron acceso al CRM. Escribí el código que te llegó a{" "}
                     <span className="text-text">{email}</span> y elegí la
-                    contraseña con la que vas a entrar. El código vence en 24
-                    horas.
+                    contraseña con la que vas a entrar. El código vence en{" "}
+                    {ETIQUETA_VENTANA_INVITACION}.
                   </>
                 ) : (
                   <>
                     Te lo enviamos a <span className="text-text">{email}</span>.
-                    Vence en 15 minutos.
+                    Vence en {ETIQUETA_VENTANA_RECUPERACION}.
                   </>
                 )}
               </p>

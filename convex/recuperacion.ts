@@ -2,6 +2,7 @@ import { action, internalMutation } from "./_generated/server";
 import { api, internal } from "./_generated/api";
 import { v } from "convex/values";
 import { normalizarEmail, ENVIO_FALLIDO } from "./emailUtils";
+import { faltaConfigDeEnvio } from "./ResendOTP";
 
 /** Ventana del límite de solicitudes: como mucho una cada 60 segundos por correo. */
 const VENTANA_THROTTLE_MS = 60 * 1000;
@@ -141,8 +142,15 @@ export const limpiarThrottleAntiguo = internalMutation({
  */
 export const solicitarCodigo = action({
   args: { email: v.string() },
-  returns: v.union(v.literal("enviado"), v.literal("fallo_envio")),
-  handler: async (ctx, args): Promise<"enviado" | "fallo_envio"> => {
+  returns: v.union(
+    v.literal("enviado"),
+    v.literal("fallo_envio"),
+    v.literal("frenado"),
+  ),
+  handler: async (
+    ctx,
+    args,
+  ): Promise<"enviado" | "fallo_envio" | "frenado"> => {
     const email = normalizarEmail(args.email);
 
     const reserva = await ctx.runMutation(
@@ -150,7 +158,44 @@ export const solicitarCodigo = action({
       { email },
     );
     if (!reserva.permitido) {
-      return "enviado";
+      // GER-242 — Frenado por el límite de 60 s. A quién se le dice depende de
+      // lo que ya sepa la otra parte:
+      //
+      //   activación pendiente  se le dice "frenado". Que esa cuenta existe ya
+      //                         se lo dijo `estadoCuenta` para poder mandarla a
+      //                         activar, así que reconocerlo acá no revela nada
+      //                         nuevo — y callarlo sí hace daño: quien toca
+      //                         "no me llegó el código, enviar otro" se queda
+      //                         esperando un correo que nunca se pidió.
+      //
+      //   cualquier otro caso   se le dice "enviado", igual que siempre. Una
+      //                         cuenta con contraseña y un correo inexistente
+      //                         tienen que seguir siendo INDISTINGUIBLES: si el
+      //                         freno se notara solo en las que existen, este
+      //                         camino volvería a ser un oráculo de qué correos
+      //                         tienen acceso al CRM.
+      const estado = await ctx.runQuery(internal.usuarios._estadoCodigo, {
+        email,
+      });
+      const enActivacion = estado.tipo !== "ambiguo" && estado.pendiente;
+      return enActivacion ? "frenado" : "enviado";
+    }
+
+    // GER-242 — Config primero, ANTES de que la librería genere el código.
+    // Entre que lo crea y que llama a nuestro envío hay un tramo suyo que puede
+    // lanzar (p. ej. `redirectAbsoluteUrl` sin `SITE_URL`), y ahí no hay forma
+    // de limpiar: el código quedaría huérfano afirmando ser utilizable. Ver
+    // `faltaConfigDeEnvio`. Se libera la reserva porque no salió ningún correo.
+    const falta = faltaConfigDeEnvio();
+    if (falta !== null) {
+      console.error(
+        `GER-242: no se pidió código, falta la variable de entorno ${falta}`,
+      );
+      await ctx.runMutation(internal.recuperacion.liberarSolicitud, {
+        email,
+        valorAnterior: reserva.valorAnterior,
+      });
+      return "fallo_envio";
     }
 
     try {
