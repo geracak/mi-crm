@@ -158,3 +158,88 @@ botón *Generate Production Deploy Key*, con el permiso `deployment:deploy`).
 **Verificación:** `/equipo` volvió a funcionar tras `npx convex deploy --yes`,
 confirmado ejecutando la query real contra prod:
 `npx convex run usuarios:equipo '{}' --prod --identity '{"subject":"<id>|x"}'`.
+
+---
+
+## 2026-07-29 · `grep … | head -1 && echo "OK"` SIEMPRE dice OK
+
+**Categoría:** shell / verificación — **el peor tipo de error: confirmar algo falso**
+
+**Qué pasó:** para comprobar que existía `CONVEX_DEPLOY_KEY` en Railway se corrió:
+
+```bash
+railway variables --json | grep -o '"CONVEX_DEPLOY_KEY"' | head -1 \
+  && echo "--> variable PRESENTE" || echo "--> NO aparece"
+```
+
+Imprimió **"variable PRESENTE"** y se le reportó a Gerardo que la variable estaba
+puesta. No estaba. El build de Railway falló después con
+`No CONVEX_DEPLOYMENT set`, y al listar los nombres apareció que la variable se
+había creado con el nombre literal `convex deploy` en lugar de
+`CONVEX_DEPLOY_KEY`.
+
+**Causa raíz:** el código de salida de una tubería es el del ÚLTIMO comando, y
+`head -1` termina en 0 aunque no reciba una sola línea. El `&&` nunca miró a
+`grep`. La comprobación no podía fallar: habría dicho "PRESENTE" con cualquier
+cosa, incluso con el servicio inexistente.
+
+**Regla preventiva:** para "¿existe X?" usar `grep -c` y comparar el número, o
+`grep -q` a secas. **Nunca** encadenar un filtro después del `grep` cuyo código
+de salida se está usando:
+
+```bash
+# MAL — head/tail/sort/cut/wc devuelven 0 siempre, tapan al grep
+cmd | grep -o 'X' | head -1 && echo "existe"
+
+# BIEN — el número es el dato, no el código de salida
+test "$(cmd | grep -c '^X=')" -ge 1 && echo "existe"
+
+# BIEN — grep -q es el último de la tubería, su código sí manda
+cmd | grep -q '^X=' && echo "existe"
+```
+
+**Regla más general (la que de verdad importa):** una verificación que no puede
+dar negativo no es una verificación. Antes de reportar un check en verde,
+preguntarse *"¿qué tendría que pasar para que esto diera rojo?"* — y cuando sea
+barato, **correr el control negativo**. En esta misma sesión sirvió dos veces:
+
+- el vencimiento de códigos se probó con fecha pasada (rechaza) **y** con fecha
+  futura + código incorrecto (error distinto), lo que demuestra que discrimina
+  en vez de rechazar todo;
+- la clave de despliegue nueva se validó con un dry-run que funcionó **y** con
+  una clave inventada que dio 401, lo que demuestra que el dry-run realmente usa
+  la clave y no las credenciales locales de quien lo corre.
+
+**Coste real:** dos builds de producción fallidos y una ronda entera de
+diagnóstico sobre una premisa falsa que yo mismo había afirmado.
+
+---
+
+## 2026-07-29 · Los mensajes de error de `convex deploy` dicen en qué escalón estás
+
+**Categoría:** despliegue / diagnóstico
+
+**Qué se aprendió:** al integrar `npx convex deploy --cmd 'npm run build'` en el
+build de Railway, los dos fallos consecutivos dieron mensajes DISTINTOS, y esa
+diferencia es el diagnóstico:
+
+| Mensaje | Significa |
+|---|---|
+| `✖ No CONVEX_DEPLOYMENT set, run npx convex dev…` | `CONVEX_DEPLOY_KEY` no llegó al proceso (falta, mal nombrada, o no expuesta al build) |
+| `401 Unauthorized: AuthenticationFailed: Invalid Convex deploy key` | La variable SÍ llegó; la clave es inválida o fue revocada |
+
+Pasar del primero al segundo es progreso, no un fallo nuevo.
+
+**How to apply:** la deploy key se puede generar **desde el CLI**, no hace falta
+el dashboard: `npx convex deployment token create <nombre> --prod`. Con
+`--save-env <ruta>` la escribe a un archivo en vez de imprimirla — usar siempre
+esa forma, con la ruta FUERA del repo (scratchpad), y borrar el archivo después.
+Para cargarla en Railway sin que pase por pantalla ni por el historial:
+
+```bash
+grep '^CONVEX_DEPLOY_KEY=' "$RUTA/clave.env" | cut -d= -f2- \
+  | railway variable set CONVEX_DEPLOY_KEY --stdin --skip-deploys
+```
+
+Y para relanzar el build sobre el commit nuevo (no sobre el deployment activo,
+que tras un fallo es el viejo): `railway redeploy --from-source -y`.
