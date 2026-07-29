@@ -10,7 +10,8 @@ import type { DataModel, Doc, Id } from "./_generated/dataModel";
 import { createAccount, invalidateSessions } from "@convex-dev/auth/server";
 import { api, internal } from "./_generated/api";
 import { requireUsuario, requirePropietaria } from "./authz";
-import { normalizarEmail } from "./emailUtils";
+import { normalizarEmail, ventanaCodigoMs } from "./emailUtils";
+import { faltaConfigDeEnvio } from "./ResendOTP";
 
 const ROL = v.union(v.literal("propietaria"), v.literal("comercial"));
 
@@ -173,49 +174,160 @@ export const _datosParaCorreo = internalQuery({
       // se llama cada rol de cara a la gente, y duplicar ese mapa en el módulo
       // del correo lo dejaría derivar en silencio.
       etiquetaRol: v.optional(v.string()),
+      // GER-242 — Para que la invalidación del código pueda comprobar que el
+      // hash apunta a la cuenta de ESTE envío. Sale de la consulta que ya se
+      // hace acá; pedirla aparte sería un viaje de más.
+      accountId: v.union(v.id("authAccounts"), v.null()),
     }),
     v.null(),
   ),
   handler: async (ctx, args) => {
-    const u = await usuarioPorEmail(ctx, normalizarEmail(args.email));
+    const email = normalizarEmail(args.email);
+    const u = await usuarioPorEmail(ctx, email);
     if (u === null) return null;
+
+    // `take(2)`: `providerAndAccountId` no es único. Ante ambigüedad se
+    // devuelve `null` en vez de elegir una cuenta al azar — quien reciba esto
+    // simplemente se queda sin la comprobación extra, nunca con una equivocada.
+    const cuentas = await ctx.db
+      .query("authAccounts")
+      .withIndex("providerAndAccountId", (q) =>
+        q.eq("provider", "password").eq("providerAccountId", email),
+      )
+      .take(2);
+
     return {
       pendiente: u.passwordPendiente === true,
       name: u.name,
       etiquetaRol: u.rol === undefined ? undefined : ETIQUETA_ROL[u.rol],
+      accountId: cuentas.length === 1 ? cuentas[0]._id : null,
     };
   },
 });
 
 /**
- * GER-219 (E2) — Guarda cuándo vence el código que se acaba de enviar.
+ * GER-242 — Estado REAL del código de 8 dígitos de una cuenta.
  *
- * La escribe `ResendOTP.sendVerificationRequest` (que sabe si el código es de
- * invitación o de recuperación) y la lee el wrapper `authorize` de
- * `convex/auth.ts` antes de dejar cambiar la contraseña. Ver el comentario de
- * `codigoVenceEn` en el schema para por qué no basta con `provider.maxAge`.
+ * ⚠️ Esta función es el corazón del arreglo de la auditoría. Antes el
+ * vencimiento se guardaba en `users.codigoVenceEn`, un ESPEJO escrito en una
+ * transacción distinta de la que crea el código. Cualquier fallo entre las dos
+ * dejaba los datos divergentes, y como la ausencia del espejo se interpretaba
+ * como "sin restricción", la divergencia era FAIL-OPEN: un código de
+ * recuperación heredaba el tope exterior de 24 h en vez de sus 15 minutos.
+ *
+ * Ahora no hay espejo. La ventana se DERIVA de dos cosas que no pueden
+ * desincronizarse porque ninguna se escribe para esto:
+ *
+ *   `authVerificationCodes._creationTime`  cuándo nació ESTE código
+ *   `users.passwordPendiente`             si la cuenta está en activación
+ *
+ * Sin fila de código no hay nada que verificar, así que la ausencia es
+ * fail-closed por construcción y no por convención.
  */
-export const _fijarVencimientoCodigo = internalMutation({
-  args: { email: v.string(), venceEn: v.number() },
-  returns: v.null(),
-  handler: async (ctx, args) => {
-    const u = await usuarioPorEmail(ctx, normalizarEmail(args.email));
-    if (u === null) return null;
-    await ctx.db.patch(u._id, { codigoVenceEn: args.venceEn });
-    return null;
-  },
+type EstadoCodigo =
+  /** Hay exactamente un código y estos son sus datos. */
+  | { tipo: "ok"; creadoEn: number; pendiente: boolean }
+  /** Más de una fila para la misma cuenta: no se elige ninguna al azar. */
+  | { tipo: "ambiguo" }
+  /** No hay código vivo. `pendiente` sirve igual para decidir la pantalla. */
+  | { tipo: "sin-codigo"; pendiente: boolean };
+
+/**
+ * Función normal (no query) para que corra DENTRO de la transacción de quien
+ * llame — mismo criterio que `validarActualizacion`.
+ */
+async function estadoDelCodigo(
+  ctx: QueryCtx,
+  emailSinNormalizar: string,
+): Promise<EstadoCodigo> {
+  const email = normalizarEmail(emailSinNormalizar);
+  const usuario = await usuarioPorEmail(ctx, email);
+  const pendiente = usuario?.passwordPendiente === true;
+
+  // `providerAndAccountId` NO es único (Convex no tiene índices únicos), así
+  // que se comprueba en vez de asumir. Mismo patrón que `_buscarPorEmail`.
+  const cuentas = await ctx.db
+    .query("authAccounts")
+    .withIndex("providerAndAccountId", (q) =>
+      q.eq("provider", "password").eq("providerAccountId", email),
+    )
+    .take(2);
+  if (cuentas.length > 1) return { tipo: "ambiguo" };
+  if (cuentas.length === 0) return { tipo: "sin-codigo", pendiente };
+
+  const codigos = await ctx.db
+    .query("authVerificationCodes")
+    .withIndex("accountId", (q) => q.eq("accountId", cuentas[0]._id))
+    .take(2);
+  if (codigos.length > 1) return { tipo: "ambiguo" };
+  if (codigos.length === 0) return { tipo: "sin-codigo", pendiente };
+
+  return { tipo: "ok", creadoEn: codigos[0]._creationTime, pendiente };
+}
+
+/** Lo que `convex/auth.ts` necesita para decidir si un código sigue sirviendo. */
+export const _estadoCodigo = internalQuery({
+  args: { email: v.string() },
+  returns: v.union(
+    v.object({
+      tipo: v.literal("ok"),
+      creadoEn: v.number(),
+      pendiente: v.boolean(),
+    }),
+    v.object({ tipo: v.literal("ambiguo") }),
+    v.object({ tipo: v.literal("sin-codigo"), pendiente: v.boolean() }),
+  ),
+  handler: async (ctx, args) => await estadoDelCodigo(ctx, args.email),
 });
 
 /**
- * GER-219 (E2) — Lee el vencimiento del código vigente. La usa el wrapper
- * `authorize` de `convex/auth.ts`.
+ * GER-242 — Invalida el código de UN envío concreto, identificado por el hash
+ * de su token.
+ *
+ * ⚠️ Por qué por hash y no por cuenta: la librería crea el código en una
+ * mutación y lo envía desde una acción aparte, así que dos solicitudes se
+ * pueden intercalar. Si el borrado fuera por `accountId`, un intento fallido
+ * borraría el código de otro intento que SÍ se entregó. El hash ata la fila a
+ * este envío: si otro ya la reemplazó, no coincide con ninguna y no se borra
+ * nada — que es justo lo correcto.
+ *
+ * El formato es el de la librería, verificado en su código:
+ * `generateUniqueVerificationCode` guarda `code: await sha256(code)` y ese
+ * `sha256` es `encodeHexLowerCase(rawSha256(...))`
+ * (`dist/server/implementation/utils.js:9-11`).
+ *
+ * ⚠️ El índice `code` NO es único a nivel de schema (la librería lo consulta
+ * con `.unique()`, pero Convex no lo impone). Ante una colisión no se elige una
+ * fila al azar: no se borra nada y se informa, igual que en el resto de las
+ * guardas de ambigüedad del proyecto.
+ *
+ * Devuelve qué pasó, para que quien llama pueda distinguir "lo borré" de "ya no
+ * estaba" sin tener que adivinarlo.
  */
-export const _vencimientoCodigo = internalQuery({
-  args: { email: v.string() },
-  returns: v.union(v.number(), v.null()),
+export const _invalidarCodigoPorHash = internalMutation({
+  args: { hash: v.string(), accountId: v.optional(v.id("authAccounts")) },
+  returns: v.union(
+    v.literal("borrado"),
+    v.literal("no-estaba"),
+    v.literal("ambiguo"),
+  ),
   handler: async (ctx, args) => {
-    const u = await usuarioPorEmail(ctx, normalizarEmail(args.email));
-    return u?.codigoVenceEn ?? null;
+    const filas = await ctx.db
+      .query("authVerificationCodes")
+      .withIndex("code", (q) => q.eq("code", args.hash))
+      .take(2);
+    if (filas.length > 1) return "ambiguo";
+    if (filas.length === 0) return "no-estaba";
+
+    // Defensa extra: si quien llama sabe a qué cuenta pertenecía su envío, el
+    // hash tiene además que apuntar a esa cuenta. Una colisión de hash con otra
+    // cuenta es inverosímil, pero no borrar por ella cuesta una comparación.
+    if (args.accountId !== undefined && filas[0].accountId !== args.accountId) {
+      return "ambiguo";
+    }
+
+    await ctx.db.delete(filas[0]._id);
+    return "borrado";
   },
 });
 
@@ -245,6 +357,12 @@ export const _vencimientoCodigo = internalQuery({
  *   `activacion-lista`     hay un código de invitación todavía vigente; el
  *                          login NO debe mandar nada, solo pedirlo
  *   `activacion-vencida`   no queda código útil; hay que mandar uno nuevo
+ *
+ * GER-242 — `activacion-lista` se decide mirando el CÓDIGO que existe ahora, no
+ * un vencimiento guardado aparte. Con el espejo, un reenvío cuyo correo fallaba
+ * dejaba el vencimiento viejo apuntando al futuro mientras la librería ya había
+ * reemplazado el código: la pantalla afirmaba que había un código utilizable en
+ * el buzón cuando el viejo estaba borrado y el nuevo no había salido.
  */
 export const estadoCuenta = query({
   args: { email: v.string() },
@@ -254,12 +372,16 @@ export const estadoCuenta = query({
     v.literal("normal"),
   ),
   handler: async (ctx, args) => {
-    const u = await usuarioPorEmail(ctx, normalizarEmail(args.email));
-    if (u === null || u.passwordPendiente !== true) return "normal";
-    // `undefined` cuenta como vencido: si no sabemos cuándo vence, no podemos
-    // prometerle a nadie que el código que tiene en el buzón sigue sirviendo.
-    const vence = u.codigoVenceEn;
-    return vence !== undefined && Date.now() < vence
+    const estado = await estadoDelCodigo(ctx, args.email);
+
+    // Ambiguo se trata como "normal" a propósito: es un estado roto de datos y
+    // la pantalla de contraseña es la que menos promete. La ambigüedad la
+    // rechaza de verdad el control de `convex/auth.ts` al verificar.
+    if (estado.tipo === "ambiguo") return "normal";
+    if (!estado.pendiente) return "normal";
+    if (estado.tipo === "sin-codigo") return "activacion-vencida";
+
+    return Date.now() - estado.creadoEn <= ventanaCodigoMs(estado.pendiente)
       ? "activacion-lista"
       : "activacion-vencida";
   },
@@ -396,6 +518,32 @@ export const _actualizarFilas = internalMutation({
     }
     if (cuentasPassword.length === 1) {
       await ctx.db.patch(cuentasPassword[0]._id, { providerAccountId: email });
+
+      // ⚠️ GER-242 — Invalidar el código pendiente, en ESTA transacción.
+      //
+      // `ResendOTP.authorize` valida el código contra `providerAccountId`, que
+      // se acaba de mover al correo nuevo. Sin borrarlo, el código que se envió
+      // al buzón VIEJO pasaría a autorizar la activación bajo el correo NUEVO
+      // durante el resto de su ventana — o sea que quien controle el buzón
+      // viejo puede fijar la contraseña de esa cuenta. Es exactamente el acceso
+      // que cambiar el correo pretende cortar.
+      //
+      // Va junto al patch y no en una llamada aparte a propósito: dos
+      // transacciones dejarían un instante con el identificador ya movido y el
+      // código viejo todavía válido.
+      //
+      // Acá SÍ se borra por `accountId` (a diferencia de
+      // `_invalidarCodigoPorHash`, que se ata al token): la intención es
+      // distinta. Allá es "limpiá lo tuyo sin pisar lo ajeno"; acá es "no debe
+      // quedar NINGÚN código de esta cuenta", que es la invariante que revoca
+      // el acceso del buzón anterior.
+      const codigos = await ctx.db
+        .query("authVerificationCodes")
+        .withIndex("accountId", (q) => q.eq("accountId", cuentasPassword[0]._id))
+        .collect();
+      for (const codigo of codigos) {
+        await ctx.db.delete(codigo._id);
+      }
     }
 
     // ⚠️ Desvincular Google. Una cuenta de Google ya vinculada se reconoce por
@@ -470,12 +618,44 @@ export const _eliminarFilas = internalMutation({
       throw new ConvexError("No podés dejar el negocio sin ninguna dueña.");
     }
 
+    // GER-242 (B1) — Los seguimientos PENDIENTES pasan a quien ejecuta el
+    // borrado. Sin esto quedaban apuntando a un usuario inexistente y se
+    // mostraban sin nombre (`responsableNombre: responsable?.name` en
+    // `seguimientos.ts`), o sea trabajo vivo que ya no era de nadie visible.
+    //
+    // Los completados NO se tocan: son historia y decir que los hizo otra
+    // persona sería falsear el registro. Su nombre en blanco es el coste
+    // aceptado de haber quitado a alguien del equipo.
+    //
+    // Escala MVP: se recorren todos los pendientes del negocio y se filtra en
+    // memoria porque no hay índice por responsable. Mismo criterio que
+    // `contarPropietarias` y `listar`.
+    const pendientes = await ctx.db
+      .query("seguimientos")
+      .withIndex("by_hecho_vence", (q) => q.eq("hecho", false))
+      .collect();
+    for (const s of pendientes) {
+      if (s.responsableId === args.id) {
+        await ctx.db.patch(s._id, { responsableId: args.actorId });
+      }
+    }
+
     // Todas sus credenciales, de cualquier proveedor (password y google).
     const cuentas = await ctx.db
       .query("authAccounts")
       .withIndex("userIdAndProvider", (q) => q.eq("userId", args.id))
       .collect();
     for (const cuenta of cuentas) {
+      // GER-242 (M3) — Los códigos van ANTES que su cuenta. Al revés quedarían
+      // filas apuntando a un `accountId` que ya no existe, imposibles de
+      // localizar después salvo barriendo la tabla entera.
+      const codigos = await ctx.db
+        .query("authVerificationCodes")
+        .withIndex("accountId", (q) => q.eq("accountId", cuenta._id))
+        .collect();
+      for (const codigo of codigos) {
+        await ctx.db.delete(codigo._id);
+      }
       await ctx.db.delete(cuenta._id);
     }
     await ctx.db.delete(args.id);
@@ -569,6 +749,19 @@ export const invitar = action({
     // Cualquier fallo se reporta como "no salió el correo" y NO revierte el
     // alta: la persona ya está en el equipo y la dueña puede reenviarle el
     // código, mientras que deshacer el alta dejaría una cuenta a medio crear.
+    // GER-242 — Config primero: si falta, se corta ANTES de que la librería
+    // genere el código. Sin esto quedaba una fila de `authVerificationCodes` de
+    // un código que nadie recibió, y `estadoCuenta` afirmaba que había uno
+    // utilizable en el buzón. Ver `faltaConfigDeEnvio` para por qué no se puede
+    // limpiar desde dentro del envío.
+    const falta = faltaConfigDeEnvio();
+    if (falta !== null) {
+      console.error(
+        `GER-242: alta creada sin invitación, falta la variable ${falta}`,
+      );
+      return { id: user._id, emailEnviado: false };
+    }
+
     let emailEnviado = true;
     try {
       await ctx.runAction(api.auth.signIn, {

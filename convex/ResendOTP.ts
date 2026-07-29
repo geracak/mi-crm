@@ -3,7 +3,13 @@ import type { EmailConfig } from "@convex-dev/auth/server";
 import { ConvexError } from "convex/values";
 import type { ActionCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { normalizarEmail, ENVIO_FALLIDO } from "./emailUtils";
+import {
+  normalizarEmail,
+  ENVIO_FALLIDO,
+  VENTANA_INVITACION_MS,
+  ETIQUETA_VENTANA_INVITACION,
+  ETIQUETA_VENTANA_RECUPERACION,
+} from "./emailUtils";
 
 /**
  * GER-239 / GER-219 (E2) — Proveedor del código de un solo uso que se manda por
@@ -27,16 +33,6 @@ import { normalizarEmail, ENVIO_FALLIDO } from "./emailUtils";
  * De ahí el spread + sobrescritura explícita de abajo.
  */
 
-/** Vida del código de recuperación: hay una contraseña vigente que proteger. */
-const MINUTOS_RECUPERACION = 15;
-
-/**
- * Vida del código de invitación. Largo a propósito: nadie abre el correo al
- * instante, y con 15 minutos lo primero que vería del producto quien acaba de
- * ser invitada sería "código incorrecto o vencido".
- */
-const HORAS_INVITACION = 24;
-
 const DIGITOS = 8;
 
 /**
@@ -45,13 +41,15 @@ const DIGITOS = 8;
  * La librería solo admite un vencimiento por proveedor: lo lee una sola vez al
  * generar el código (`dist/server/implementation/signIn.js:61`,
  * `Date.now() + provider.maxAge * 1000`) y ahí no hay forma de saber a quién se
- * le está mandando. Por eso se pone el mayor de los dos y el vencimiento que
- * corresponde a cada caso se guarda en `users.codigoVenceEn` al enviar (abajo)
- * y se exige antes de cambiar la contraseña (wrapper `authorize` de
- * `convex/auth.ts`). Bajar este número por debajo de `HORAS_INVITACION` haría
- * que las invitaciones vencieran antes de tiempo sin que ningún check avise.
+ * le está mandando. Por eso se pone el mayor de los dos.
+ *
+ * GER-242 — El vencimiento REAL de cada código ya no se guarda en ningún lado:
+ * se DERIVA al verificarlo, en el wrapper `authorize` de `convex/auth.ts`, a
+ * partir del `_creationTime` de su fila y de `passwordPendiente`. Bajar este
+ * número por debajo de la ventana de invitación haría que las invitaciones
+ * vencieran antes de tiempo sin que ningún check avise.
  */
-const MAX_AGE_S = HORAS_INVITACION * 60 * 60;
+const MAX_AGE_S = VENTANA_INVITACION_MS / 1000;
 
 /** Cuerpo de la respuesta que se incluye en los errores, recortado. */
 const MAX_CUERPO_ERROR = 300;
@@ -62,6 +60,32 @@ const URL_RESEND = "https://api.resend.com/emails";
 const TIMEOUT_MS = 10_000;
 
 const REMITENTE = "Vibe CRM <no-reply@red-24.com>";
+
+/**
+ * GER-242 — ¿Está la configuración necesaria para mandar un código? Devuelve el
+ * nombre de la variable que falta, o `null` si está todo.
+ *
+ * ⚠️ Se comprueba ANTES de pedirle a la librería que genere el código, no
+ * dentro del envío, y esa diferencia es el arreglo.
+ *
+ * Verificado en `dist/server/implementation/signIn.js`: la librería crea la
+ * fila de `authVerificationCodes` en la línea 62 y recién en la 78 llama a
+ * `sendVerificationRequest`. Entre medio, la 71 hace `redirectAbsoluteUrl`, que
+ * LANZA si falta `SITE_URL`. O sea que hay un tramo —propiedad de la librería—
+ * en el que el código ya existe y nuestro callback todavía no corrió: nada de
+ * lo que pongamos dentro de `sendVerificationRequest` puede limpiar ahí, porque
+ * no llega a ejecutarse.
+ *
+ * La única forma de que no quede un código huérfano en ese tramo es no llegar a
+ * crearlo. Por eso `usuarios:invitar` y `recuperacion:solicitarCodigo` llaman a
+ * esto antes de disparar el flujo `reset`: fallan sin efectos en vez de fallar
+ * a medias.
+ */
+export function faltaConfigDeEnvio(): string | null {
+  if (!process.env.RESEND_API_KEY) return "RESEND_API_KEY";
+  if (!process.env.SITE_URL) return "SITE_URL";
+  return null;
+}
 
 /**
  * Código numérico de 8 dígitos con muestreo por rechazo.
@@ -166,7 +190,7 @@ function correoInvitacion(datos: {
     `Abrí ${datos.urlLogin}, escribí este correo y después el código.`,
     "Ahí elegís tu contraseña.",
     "",
-    `El código vence en ${HORAS_INVITACION} horas y solo se puede usar una vez.`,
+    `El código vence en ${ETIQUETA_VENTANA_INVITACION} y solo se puede usar una vez.`,
     "Si no esperabas este mensaje, podés ignorarlo.",
   ].join("\n");
 
@@ -179,7 +203,7 @@ function correoInvitacion(datos: {
     "<p>Tu código para entrar por primera vez es:</p>",
     `<p style="font-size:28px;font-weight:600;letter-spacing:4px">${datos.codigo}</p>`,
     `<p>Abrí <a href="${escapeHtml(datos.urlLogin)}">${escapeHtml(datos.urlLogin)}</a>, escribí este correo y después el código. Ahí elegís tu contraseña.</p>`,
-    `<p>El código vence en ${HORAS_INVITACION} horas y solo se puede usar una vez.</p>`,
+    `<p>El código vence en ${ETIQUETA_VENTANA_INVITACION} y solo se puede usar una vez.</p>`,
     "<p>Si no esperabas este mensaje, podés ignorarlo.</p>",
   ].join("");
 
@@ -199,13 +223,13 @@ function correoRecuperacion(codigo: string): Correo {
       "",
       `Tu código es: ${codigo}`,
       "",
-      `Vence en ${MINUTOS_RECUPERACION} minutos y solo se puede usar una vez.`,
+      `Vence en ${ETIQUETA_VENTANA_RECUPERACION} y solo se puede usar una vez.`,
       "Si no lo pediste vos, ignorá este mensaje: tu contraseña no cambia.",
     ].join("\n"),
     html: [
       "<p>Pediste recuperar tu contraseña de Vibe CRM.</p>",
       `<p style="font-size:28px;font-weight:600;letter-spacing:4px">${codigo}</p>`,
-      `<p>Vence en ${MINUTOS_RECUPERACION} minutos y solo se puede usar una vez.</p>`,
+      `<p>Vence en ${ETIQUETA_VENTANA_RECUPERACION} y solo se puede usar una vez.</p>`,
       "<p>Si no lo pediste vos, ignorá este mensaje: tu contraseña no cambia.</p>",
     ].join(""),
   };
@@ -224,111 +248,198 @@ type EnviarCodigo = (
   ctx: ActionCtx,
 ) => Promise<void>;
 
+/**
+ * GER-242 — El hash con el que la librería guarda el código, reproducido.
+ *
+ * Verificado en su código: `generateUniqueVerificationCode` persiste
+ * `code: await sha256(code)`, y ese `sha256` es
+ * `encodeHexLowerCase(rawSha256(new TextEncoder().encode(input)))`
+ * (`dist/server/implementation/utils.js:9-11`). O sea SHA-256 en hexadecimal
+ * minúsculas.
+ *
+ * ⚠️ Se recalcula con Web Crypto en vez de importar el helper de la librería:
+ * ese helper NO está exportado en el entry público `./server`, y depender de una
+ * ruta interna de `dist/` se rompe en silencio en cualquier actualización.
+ * SHA-256 hex-minúsculas es un formato cerrado que no puede "casi" coincidir.
+ */
+async function hashDelCodigo(codigo: string): Promise<string> {
+  const bytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(codigo),
+  );
+  return Array.from(new Uint8Array(bytes))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 const sendVerificationRequest: EnviarCodigo = async (
   { identifier: email, token },
   ctx,
 ) => {
-  const apiKey = process.env.RESEND_API_KEY;
-  // Sin clave se lanza en vez de intentar el envío: un fetch sin autenticación
-  // devolvería 401 y, sin la comprobación de abajo, se tomaría por éxito.
-  if (!apiKey) {
-    throw new ConvexError(
-      `${ENVIO_FALLIDO}: falta la variable de entorno RESEND_API_KEY`,
-    );
-  }
-
-  // El `identifier` llega SIN normalizar (es `params.email` tal cual lo mandó
-  // quien llamó): `createVerificationCode` devuelve `email ?? phone` en crudo.
-  // Un espacio final o mayúsculas harían que Resend rechazara la dirección con
-  // un 422, y además impedirían encontrar la cuenta acá abajo.
-  const destino = normalizarEmail(email);
-
-  const datos = await ctx.runQuery(internal.usuarios._datosParaCorreo, {
-    email: destino,
-  });
-  // `null` = no hay cuenta con ese correo. Se trata como recuperación: es el
-  // camino que no revela nada. (En la práctica no se llega, porque el flujo
-  // `reset` de la librería exige que la cuenta exista antes de generar código.)
-  const esInvitacion = datos?.pendiente === true;
-
-  const venceEn =
-    Date.now() +
-    (esInvitacion
-      ? HORAS_INVITACION * 60 * 60 * 1000
-      : MINUTOS_RECUPERACION * 60 * 1000);
-  await ctx.runMutation(internal.usuarios._fijarVencimientoCodigo, {
-    email: destino,
-    venceEn,
-  });
-
-  let correo: Correo;
-  if (esInvitacion) {
-    const siteUrl = process.env.SITE_URL;
-    if (!siteUrl) {
+  // ⚠️ GER-242 — TODO el cuerpo va dentro de este `try`, y eso es la corrección,
+  // no un detalle de estilo.
+  //
+  // La librería crea (o reemplaza) la fila de `authVerificationCodes` ANTES de
+  // llamarnos, así que cualquier salida sin entrega deja vivo un código que
+  // nadie recibió: `estadoCuenta` diría que hay un código utilizable en el buzón
+  // y la persona quedaría atrapada probando uno que no existe.
+  //
+  // La versión anterior enumeraba las salidas a limpiar (el catch del fetch y
+  // el `!respuesta.ok`) y por eso se dejaba fuera las dos que ocurren ANTES del
+  // fetch: `RESEND_API_KEY` ausente y `SITE_URL` ausente. Enumerar salidas
+  // envejece mal — cualquier salida nueva nace descubierta. Envolviendo el
+  // cuerpo entero, la invariante deja de depender de que alguien se acuerde.
+  //
+  // INVARIANTE: toda terminación sin entrega invalida el código de ESTE envío
+  // antes de propagar el error.
+  try {
+    const apiKey = process.env.RESEND_API_KEY;
+    // Sin clave se lanza en vez de intentar el envío: un fetch sin autenticación
+    // devolvería 401 y, sin la comprobación de abajo, se tomaría por éxito.
+    if (!apiKey) {
       throw new ConvexError(
-        `${ENVIO_FALLIDO}: falta la variable de entorno SITE_URL`,
+        `${ENVIO_FALLIDO}: falta la variable de entorno RESEND_API_KEY`,
       );
     }
-    correo = correoInvitacion({
-      nombre: datos?.name,
-      etiquetaRol: datos?.etiquetaRol,
-      codigo: token,
-      urlLogin: `${siteUrl.replace(/\/$/, "")}/login`,
-    });
-  } else {
-    correo = correoRecuperacion(token);
-  }
 
-  // ⚠️ El `fetch` va envuelto a propósito. `fetch` LANZA (no devuelve una
-  // respuesta) ante fallos de transporte: DNS, TLS, red caída, timeout. Ese
-  // error sería un Error normal, no un ConvexError con la marca, así que la
-  // interfaz lo tomaría por "cualquier otro error" y mostraría el mensaje
-  // neutro — diría que enviamos un código que nunca salió. Comprobar
-  // `respuesta.ok` solo cubre lo que pasa DESPUÉS de tener respuesta.
-  let respuesta: Response;
-  try {
-    respuesta = await fetch(URL_RESEND, {
-      method: "POST",
-      // Un cuelgue se corta acá en vez de agotar el tiempo de la acción; el
-      // AbortError cae en este mismo catch.
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        from: REMITENTE,
-        to: [destino],
-        subject: correo.subject,
-        text: correo.text,
-        html: correo.html,
-      }),
-    });
-  } catch (causa) {
-    // Solo el mensaje, recortado: nunca la traza, ni las cabeceras, ni la clave.
-    const detalle = (
-      causa instanceof Error ? causa.message : String(causa)
-    ).slice(0, MAX_CUERPO_ERROR);
-    throw new ConvexError(
-      `${ENVIO_FALLIDO}: no se pudo contactar con Resend: ${detalle}`,
-    );
-  }
+    // El `identifier` llega SIN normalizar (es `params.email` tal cual lo mandó
+    // quien llamó): `createVerificationCode` devuelve `email ?? phone` en crudo.
+    // Un espacio final o mayúsculas harían que Resend rechazara la dirección con
+    // un 422, y además impedirían encontrar la cuenta acá abajo.
+    const destino = normalizarEmail(email);
 
-  // `fetch` NO lanza en 4xx/5xx. Sin esto, un rechazo de Resend se tomaría por
-  // envío correcto y la interfaz diría que mandó un código que no existe.
-  if (!respuesta.ok) {
-    // Se incluyen estado y cuerpo recortado para poder diagnosticar; jamás las
-    // cabeceras ni la API key. `text()` también puede lanzar si la conexión se
-    // corta a media lectura, así que no puede tumbar el error real.
-    const cuerpo = (await respuesta.text().catch(() => "(sin cuerpo)")).slice(
-      0,
-      MAX_CUERPO_ERROR,
-    );
-    throw new ConvexError(
-      `${ENVIO_FALLIDO}: Resend rechazó el envío (${respuesta.status}): ${cuerpo}`,
-    );
+    const datos = await ctx.runQuery(internal.usuarios._datosParaCorreo, {
+      email: destino,
+    });
+    // `null` = no hay cuenta con ese correo. Se trata como recuperación: es el
+    // camino que no revela nada. (En la práctica no se llega, porque el flujo
+    // `reset` de la librería exige que la cuenta exista antes de generar código.)
+    const esInvitacion = datos?.pendiente === true;
+
+    let correo: Correo;
+    if (esInvitacion) {
+      const siteUrl = process.env.SITE_URL;
+      if (!siteUrl) {
+        throw new ConvexError(
+          `${ENVIO_FALLIDO}: falta la variable de entorno SITE_URL`,
+        );
+      }
+      correo = correoInvitacion({
+        nombre: datos?.name,
+        etiquetaRol: datos?.etiquetaRol,
+        codigo: token,
+        urlLogin: `${siteUrl.replace(/\/$/, "")}/login`,
+      });
+    } else {
+      correo = correoRecuperacion(token);
+    }
+
+    // ⚠️ El `fetch` va envuelto a propósito. `fetch` LANZA (no devuelve una
+    // respuesta) ante fallos de transporte: DNS, TLS, red caída, timeout. Ese
+    // error sería un Error normal, no un ConvexError con la marca, así que la
+    // interfaz lo tomaría por "cualquier otro error" y mostraría el mensaje
+    // neutro — diría que enviamos un código que nunca salió. Comprobar
+    // `respuesta.ok` solo cubre lo que pasa DESPUÉS de tener respuesta.
+    let respuesta: Response;
+    try {
+      respuesta = await fetch(URL_RESEND, {
+        method: "POST",
+        // Un cuelgue se corta acá en vez de agotar el tiempo de la acción; el
+        // AbortError cae en este mismo catch.
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: REMITENTE,
+          to: [destino],
+          subject: correo.subject,
+          text: correo.text,
+          html: correo.html,
+        }),
+      });
+    } catch (causa) {
+      // Solo el mensaje, recortado: nunca la traza, ni las cabeceras, ni la clave.
+      const detalle = (
+        causa instanceof Error ? causa.message : String(causa)
+      ).slice(0, MAX_CUERPO_ERROR);
+      throw new ConvexError(
+        `${ENVIO_FALLIDO}: no se pudo contactar con Resend: ${detalle}`,
+      );
+    }
+
+    // `fetch` NO lanza en 4xx/5xx. Sin esto, un rechazo de Resend se tomaría por
+    // envío correcto y la interfaz diría que mandó un código que no existe.
+    if (!respuesta.ok) {
+      // Se incluyen estado y cuerpo recortado para poder diagnosticar; jamás las
+      // cabeceras ni la API key. `text()` también puede lanzar si la conexión se
+      // corta a media lectura, así que no puede tumbar el error real.
+      const cuerpo = (await respuesta.text().catch(() => "(sin cuerpo)")).slice(
+        0,
+        MAX_CUERPO_ERROR,
+      );
+      throw new ConvexError(
+        `${ENVIO_FALLIDO}: Resend rechazó el envío (${respuesta.status}): ${cuerpo}`,
+      );
+    }
+  } catch (fallo) {
+    await invalidarCodigoNoEntregado(ctx, email, token);
+    throw fallo; // el error tiene que seguir viaje: de él vive `ENVIO_FALLIDO`
   }
 };
+
+/**
+ * Borra el código de ESTE envío, identificado por el hash de su token.
+ *
+ * ⚠️ Por hash y no por cuenta: la creación del código y su envío están
+ * separados por límites de acción, y `auth:signIn` es pública, así que dos
+ * solicitudes se pueden intercalar. Si se borrara por `accountId`, un intento
+ * fallido podría llevarse el código de otro intento que SÍ se entregó. Con el
+ * hash, si otro envío ya reemplazó la fila simplemente no hay coincidencia.
+ *
+ * Nunca lanza: se la llama desde un `catch` cuyo error es el que importa, y
+ * taparlo con otro dejaría al llamador sin la marca `ENVIO_FALLIDO`.
+ */
+async function invalidarCodigoNoEntregado(
+  ctx: ActionCtx,
+  email: string,
+  token: string,
+): Promise<void> {
+  try {
+    const destino = normalizarEmail(email);
+    const datos = await ctx.runQuery(internal.usuarios._datosParaCorreo, {
+      email: destino,
+    });
+    const resultado = await ctx.runMutation(
+      internal.usuarios._invalidarCodigoPorHash,
+      {
+        hash: await hashDelCodigo(token),
+        accountId: datos?.accountId ?? undefined,
+      },
+    );
+
+    // ⚠️ `no-estaba` NO es un error por sí solo: en una carrera legítima, otro
+    // envío posterior ya reemplazó nuestra fila, y no encontrarla es
+    // exactamente lo correcto. Pero también sería el síntoma de que el hash
+    // dejó de coincidir con el formato de la librería, y ahí la limpieza
+    // quedaría rota EN SILENCIO y el fallo volvería sin que nadie se entere.
+    // Por eso se registra nombrando las dos causas, en vez de callarlo o de
+    // gritarlo como si siempre fuera un problema.
+    if (resultado !== "borrado") {
+      console.error(
+        `GER-242: no se invalidó el código no entregado (${resultado}). ` +
+          "Causa esperable: otro envío lo reemplazó antes. Causa a investigar " +
+          "si se repite sin concurrencia: el hash dejó de coincidir con el de la librería.",
+      );
+    }
+  } catch (error) {
+    console.error(
+      "GER-242: falló la invalidación del código no entregado:",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
 
 const base = Email({
   sendVerificationRequest: sendVerificationRequest as unknown as EmailConfig["sendVerificationRequest"],

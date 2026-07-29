@@ -89,7 +89,9 @@ export function EliminarUsuarioOverlay({
         </p>
         <p className="text-[13px] text-text-muted">
           Se cierra su sesión al instante y no va a poder volver a entrar. Los
-          clientes, ventas e interacciones que haya cargado se mantienen.
+          clientes, ventas e interacciones que haya cargado se mantienen, y sus
+          seguimientos pendientes pasan a estar a tu nombre para que no queden
+          sin dueño.
         </p>
       </div>
     </Overlay>

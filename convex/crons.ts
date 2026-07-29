@@ -19,4 +19,15 @@ crons.interval(
   internal.recuperacion.limpiarThrottleAntiguo,
 );
 
+// GER-242: desde que la invitacion lleva el codigo dentro, toda alta y todo
+// reenvio generan una fila en authVerificationCodes y no habia ningun cron que
+// las podara. Borra por la ventana derivada (24 h invitacion / 15 min
+// recuperacion), no por el expirationTime de la libreria, que es siempre el
+// tope exterior de 24 h.
+crons.interval(
+  "limpiar codigos de verificacion vencidos",
+  { hours: 1 },
+  internal.authMaintenance.limpiarCodigosVencidos,
+);
+
 export default crons;

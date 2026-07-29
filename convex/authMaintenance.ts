@@ -1,7 +1,7 @@
 import { v, ConvexError } from "convex/values";
 import { internalMutation } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
-import { normalizarEmail } from "./emailUtils";
+import { normalizarEmail, ventanaCodigoMs } from "./emailUtils";
 
 const UNA_HORA_MS = 60 * 60 * 1000;
 
@@ -24,6 +24,85 @@ export const limpiarVerifiersHuerfanos = internalMutation({
       }
     }
     return null;
+  },
+});
+
+/**
+ * GER-242 — Poda de `authVerificationCodes`.
+ *
+ * Por qué hace falta ahora: desde que la invitación lleva el código dentro,
+ * TODA alta genera una fila, y cada reenvío otra. No había ningún cron para
+ * esta tabla (sí para `authVerifiers` y `recuperacionThrottle`), así que crecía
+ * sin techo.
+ *
+ * ⚠️ Borra por la ventana DERIVADA, no por `expirationTime`. Ese campo lleva
+ * siempre el tope exterior de 24 h —la librería solo admite un `maxAge` por
+ * proveedor—, así que podar por él dejaría los códigos de recuperación, que
+ * mueren a los 15 minutos, ocupando sitio 96 veces más de lo debido. Y como el
+ * lote es de tamaño fijo, esos códigos zombis podrían llenar la corrida y
+ * retrasar la poda de los que sí importan.
+ *
+ * Un código cuya cuenta ya no existe se borra igual: es basura por definición.
+ *
+ * `take(200)` por corrida, mismo criterio que `limpiarVerifiersHuerfanos`.
+ */
+export const limpiarCodigosVencidos = internalMutation({
+  args: {},
+  returns: v.null(),
+  handler: async (ctx) => {
+    const ahora = Date.now();
+    const filas = await ctx.db
+      .query("authVerificationCodes")
+      .order("asc")
+      .take(200);
+
+    for (const fila of filas) {
+      const cuenta = await ctx.db.get(fila.accountId);
+      const usuario =
+        cuenta === null ? null : await ctx.db.get(cuenta.userId);
+
+      // Sin cuenta o sin usuario, la fila no le sirve a nadie.
+      if (usuario === null) {
+        await ctx.db.delete(fila._id);
+        continue;
+      }
+
+      const ventana = ventanaCodigoMs(usuario.passwordPendiente === true);
+      if (ahora - fila._creationTime > ventana) {
+        await ctx.db.delete(fila._id);
+      }
+    }
+    return null;
+  },
+});
+
+/**
+ * GER-242 — Limpia los restos de `users.codigoVenceEn`, el espejo que este
+ * cambio dejó de usar.
+ *
+ * ⚠️ Correr SOLO cuando ya no quede ningún consumidor leyéndolo. El campo sigue
+ * declarado en el schema a propósito: hay documentos en producción que lo
+ * tienen, y retirarlo del schema antes de limpiarlos los invalidaría. Quitarlo
+ * del schema es un paso posterior y aparte.
+ *
+ * Idempotente: sobre documentos ya limpios no hace nada, así que se puede
+ * repetir sin consecuencias.
+ *
+ *   npx convex run authMaintenance:limpiarEspejoVencimiento --prod
+ */
+export const limpiarEspejoVencimiento = internalMutation({
+  args: {},
+  returns: v.string(),
+  handler: async (ctx) => {
+    const todos = await ctx.db.query("users").collect();
+    let limpiados = 0;
+    for (const u of todos) {
+      if (u.codigoVenceEn !== undefined) {
+        await ctx.db.patch(u._id, { codigoVenceEn: undefined });
+        limpiados++;
+      }
+    }
+    return `Limpiados ${limpiados} de ${todos.length} usuarios.`;
   },
 });
 
