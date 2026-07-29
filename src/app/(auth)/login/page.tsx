@@ -113,7 +113,7 @@ export default function LoginPage() {
     const correo = normalizarEmail(String(form.get("email") ?? ""));
     setSubmitting(true);
 
-    let estado: "pendiente" | "normal";
+    let estado: "activacion-lista" | "activacion-vencida" | "normal";
     try {
       estado = await convex.query(api.usuarios.estadoCuenta, { email: correo });
     } catch {
@@ -130,10 +130,25 @@ export default function LoginPage() {
       return;
     }
 
-    // Invitación sin activar: el código ya salió con el correo de bienvenida,
-    // pero se manda uno nuevo igual. El de la invitación puede haber vencido
-    // (dura 24 h) y hacerla volver al buzón a buscar cuál de los dos sirve es
-    // peor que mandarle uno fresco ahora, que es el único que va a estar vivo.
+    // ⚠️ Invitación con el código todavía vigente: NO se manda nada.
+    //
+    // Antes se reenviaba siempre "por las dudas", y el efecto era el contrario
+    // del buscado: la persona recibía dos correos casi juntos y el de
+    // bienvenida — el que le dice "tu código es X" — quedaba invalidado por el
+    // segundo, porque la librería solo mantiene un código vivo por cuenta.
+    // Terminaba probando el que no servía. Si el código está vigente, lo único
+    // que hay que hacer es pedírselo.
+    if (estado === "activacion-lista") {
+      setEsActivacion(true);
+      setSubmitting(false);
+      setPaso("verificar");
+      setAviso(
+        `Usá el código que te llegó por correo a ${correo}. Si no lo encontrás, podés pedir uno nuevo abajo.`,
+      );
+      return;
+    }
+
+    // Vencido (o sin rastro de cuándo vencía): ahí sí hace falta uno nuevo.
     await enviarCodigo(correo, true);
   }
 
@@ -480,6 +495,19 @@ export default function LoginPage() {
                 <Button type="submit" loading={submitting} className="w-full">
                   {esActivacion ? "Entrar al CRM" : "Cambiar contraseña y entrar"}
                 </Button>
+
+                {/* La salida cuando el código no aparece o ya venció. Existe
+                    para que dejar de reenviar automáticamente no deje a nadie
+                    encerrado: ahora el reenvío lo pide la persona, que es quien
+                    sabe si el correo le llegó. */}
+                <button
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => enviarCodigo(email, esActivacion)}
+                  className="text-center text-[13px] text-text-muted hover:text-text disabled:opacity-50"
+                >
+                  No me llegó el código, enviar otro
+                </button>
 
                 <button
                   type="button"

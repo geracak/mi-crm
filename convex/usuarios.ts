@@ -228,19 +228,40 @@ export const _vencimientoCodigo = internalQuery({
  * llevan a la misma pantalla (pedir contraseña) y al mismo error si falla, así
  * que probar correos al azar no dice cuáles tienen acceso al CRM.
  *
- * Lo único que sí distingue es `"pendiente"`: revela que ese correo fue
- * invitado y todavía no activó su cuenta. Es una fuga aceptada y deliberada —
- * sin ella no hay forma de dejar de decirle "¿olvidaste tu contraseña?" a
+ * Lo único que sí distingue es la invitación sin activar: revela que ese correo
+ * fue invitado y todavía no activó su cuenta. Es una fuga aceptada y deliberada
+ * — sin ella no hay forma de dejar de decirle "¿olvidaste tu contraseña?" a
  * alguien que nunca tuvo una, que es justo el problema que esta entrega
  * resuelve. No revela nada explotable: para entrar sigue haciendo falta el
  * código que solo llega a ese buzón.
+ *
+ * ⚠️ Distingue DOS estados de invitación, y esa diferencia es un arreglo, no un
+ * detalle: mandar un código nuevo cuando el de la invitación seguía vivo hacía
+ * que la persona recibiera dos correos casi juntos y que el primero — el de
+ * bienvenida, que le dice "tu código es X" — quedara invalidado por el segundo.
+ * La librería solo mantiene un código por cuenta, así que reenviar SIEMPRE
+ * pisaba el que acababa de llegar.
+ *
+ *   `activacion-lista`     hay un código de invitación todavía vigente; el
+ *                          login NO debe mandar nada, solo pedirlo
+ *   `activacion-vencida`   no queda código útil; hay que mandar uno nuevo
  */
 export const estadoCuenta = query({
   args: { email: v.string() },
-  returns: v.union(v.literal("pendiente"), v.literal("normal")),
+  returns: v.union(
+    v.literal("activacion-lista"),
+    v.literal("activacion-vencida"),
+    v.literal("normal"),
+  ),
   handler: async (ctx, args) => {
     const u = await usuarioPorEmail(ctx, normalizarEmail(args.email));
-    return u !== null && u.passwordPendiente === true ? "pendiente" : "normal";
+    if (u === null || u.passwordPendiente !== true) return "normal";
+    // `undefined` cuenta como vencido: si no sabemos cuándo vence, no podemos
+    // prometerle a nadie que el código que tiene en el buzón sigue sirviendo.
+    const vence = u.codigoVenceEn;
+    return vence !== undefined && Date.now() < vence
+      ? "activacion-lista"
+      : "activacion-vencida";
   },
 });
 
