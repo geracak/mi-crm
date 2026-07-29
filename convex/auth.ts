@@ -17,6 +17,15 @@ import { origenesPermitidos, resolverDestino } from "./redirectOrigins";
  */
 const REGISTRO_NO_PERMITIDO = "Registro no permitido";
 
+/**
+ * GER-219 (E2) — Código de un solo uso vencido. Mensaje propio y distinto del
+ * de "código incorrecto": acá sí conviene diferenciarlos, porque no revelan
+ * nada (para llegar a este punto hay que tener un código que existió de verdad)
+ * y en cambio saber que venció es lo que le dice a la persona que pida otro en
+ * vez de volver a teclear el mismo.
+ */
+const CODIGO_VENCIDO = "El código venció. Pedí uno nuevo.";
+
 const passwordBase = Password<DataModel>({
   // GER-239: proveedor del código de un solo uso para el flujo `reset`.
   // Habilita signIn("password", { flow: "reset" | "reset-verification" }).
@@ -84,10 +93,14 @@ type ResultadoAuthorize = {
 
 /**
  * El `ctx` de `authorize` es `GenericActionCtxWithAuthConfig<DataModel>` (misma
- * referencia), o sea un ActionCtx: tiene `runMutation`. Se declara solo lo que
- * se usa, para no atarse a más superficie de la librería que la necesaria.
+ * referencia), o sea un ActionCtx: tiene `runMutation` y `runQuery`. Se declara
+ * solo lo que se usa, para no atarse a más superficie de la librería que la
+ * necesaria.
  */
-type CtxAuthorize = { runMutation: ActionCtx["runMutation"] };
+type CtxAuthorize = {
+  runMutation: ActionCtx["runMutation"];
+  runQuery: ActionCtx["runQuery"];
+};
 
 type AuthorizeCredenciales = (
   params: Record<string, unknown>,
@@ -145,6 +158,31 @@ const PasswordEndurecido = {
         typeof email === "string"
           ? { ...params, email: normalizarEmail(email) }
           : params;
+
+      // 2.bis) GER-219 (E2) — Vencimiento REAL del código.
+      //
+      // La librería solo admite un vencimiento por proveedor y acá hacen falta
+      // dos (invitación 24 h, recuperación 15 min), así que `maxAge` quedó en
+      // el mayor y el que corresponde a cada código se guardó al enviarlo, en
+      // `users.codigoVenceEn` (ver `ResendOTP.ts` y el schema).
+      //
+      // ⚠️ Va ANTES de `authorizeOriginal`: ese es el que llama a
+      // `modifyAccountCredentials` y cambia la contraseña de verdad
+      // (`dist/providers/Password.js:118-122`). Comprobarlo después dejaría la
+      // contraseña ya cambiada por un código vencido.
+      //
+      // `null` = no hay vencimiento propio guardado; manda solo el tope de la
+      // librería. Pasa con códigos emitidos antes de esta entrega, que con el
+      // `maxAge` viejo de 15 minutos ya vencieron todos igual.
+      if (params.flow === "reset-verification" && typeof email === "string") {
+        const venceEn = await ctx.runQuery(
+          internal.usuarios._vencimientoCodigo,
+          { email: normalizarEmail(email) },
+        );
+        if (venceEn !== null && Date.now() > venceEn) {
+          throw new ConvexError(CODIGO_VENCIDO);
+        }
+      }
 
       const resultado = await authorizeOriginal(paramsNormalizados, ctx);
 
