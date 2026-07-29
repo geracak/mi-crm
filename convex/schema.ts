@@ -28,7 +28,7 @@ export default defineSchema({
   // Tabla `users` de Convex Auth extendida con `rol`. Debe conservar los campos
   // e índice de authTables (perder el índice `email` o un campo rompe el login).
   // `rol` es opcional en el schema pero lo exige `requireUsuario`: solo el seed
-  // (vía createAccount con profile.rol) puede provisionarlo.
+  // y `usuarios:invitar` (vía createAccount con profile.rol) pueden provisionarlo.
   users: defineTable({
     name: v.optional(v.string()),
     image: v.optional(v.string()),
@@ -38,6 +38,23 @@ export default defineSchema({
     phoneVerificationTime: v.optional(v.number()),
     isAnonymous: v.optional(v.boolean()),
     rol: v.optional(v.union(v.literal("propietaria"), v.literal("comercial"))),
+    // GER-219 — "esta cuenta todavía tiene la contraseña aleatoria que le puso el
+    // sistema al invitarla, la persona nunca eligió una".
+    //
+    // ⚠️ Este valor NO se puede reconstruir mirando los datos, y por eso se
+    // escribe desde la PRIMERA invitación en vez de añadirse después: una cuenta
+    // recién invitada y una cuenta con contraseña propia tienen exactamente la
+    // misma fila en `authAccounts` (provider "password"). Si el campo no
+    // existiera desde el principio, no habría forma de distinguirlas y no
+    // existiría backfill posible.
+    //
+    // Ciclo de vida completo (los dos extremos viven en esta entrega):
+    //   lo ENCIENDE  `usuarios:invitar`, dentro del mismo insert que crea la fila
+    //   lo APAGA     el wrapper `authorize` de `convex/auth.ts`, en el servidor,
+    //                tras un `reset-verification` exitoso
+    // `undefined` cuenta como `false`: los usuarios que ya existían (el seed)
+    // tienen su contraseña puesta, así que no hace falta migrarlos.
+    passwordPendiente: v.optional(v.boolean()),
   }).index("email", ["email"]),
 
   clientes: defineTable({
