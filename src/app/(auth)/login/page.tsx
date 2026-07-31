@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { api } from "@/lib/convexApi";
 import { mensajeError } from "@/lib/errores";
+import { MIN_PASSWORD } from "@/lib/password";
 // Módulo PURO de convex/ (sin imports de servidor): es seguro traerlo al
 // bundle del navegador. Ver la cabecera de convex/emailUtils.ts.
 import {
@@ -30,8 +31,6 @@ const GOOGLE_INTENTO_KEY = "vibecrm:googleIntento";
  */
 const MENSAJE_NEUTRO =
   "Si el correo corresponde a una cuenta con acceso, te enviamos un código. Revisá tu bandeja y también el spam.";
-
-const MIN_PASSWORD = 8;
 
 /**
  * GER-219 (E2) — Los tres pasos del login.
