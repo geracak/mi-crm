@@ -43,6 +43,7 @@
  * comandos quedaría visible para cualquier proceso que liste la tabla.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,8 +57,13 @@ const cambiarPassword = makeFunctionReference("usuarios:cambiarPassword");
 const EMAIL = "carlos@vibecrm.local";
 const RAIZ = fileURLToPath(new URL("..", import.meta.url));
 
-/** Contraseñas de trabajo. La nueva solo vive durante la corrida. */
-const PASSWORD_NUEVA = "GER218-temporal-9f2c";
+/**
+ * Contraseñas de trabajo. La nueva es ALEATORIA en cada corrida — no un valor
+ * fijo escrito en el script — para que dos corridas no puedan pisarse (dos
+ * `verificar` en paralelo, o una corrida anterior que no llegó a restaurar) y
+ * para no dejar una credencial adivinable si la restauración fallara.
+ */
+const PASSWORD_NUEVA = `GER218-temporal-${randomUUID()}`;
 const PASSWORD_CORTA = "1234567"; // 7 caracteres: uno menos que el mínimo
 const PASSWORD_MAL = "esta-no-es-la-contrasena-000";
 
@@ -194,6 +200,13 @@ function comprobar(nombre, condicion, detalle) {
 console.log(`Deployment: ${destino.nombre} (dev)\nCuenta:     ${EMAIL}\n`);
 
 let passwordEnPie = PASSWORD_ORIGINAL;
+/**
+ * ⚠️ Si la restauración falla, el script SIEMPRE sale con código de error,
+ * pase lo que pase con `fallos`: dejar la cuenta con una contraseña temporal
+ * puesta no es un resultado "en verde" aunque las invariantes se hayan
+ * sostenido. El operador tiene que enterarse y arreglarlo a mano.
+ */
+let restauracionFallo = false;
 
 try {
   // Dos sesiones distintas de la misma persona: A hace el cambio, B es "el otro
@@ -256,13 +269,26 @@ try {
         passwordEnPie,
         PASSWORD_ORIGINAL,
       );
-      console.log(
-        r.ok
-          ? "\nContraseña restaurada a la original."
-          : "\n⚠️ NO se pudo restaurar la contraseña: sigue siendo la temporal del script.",
-      );
+      if (r.ok) {
+        console.log("\nContraseña restaurada a la original.");
+      } else {
+        restauracionFallo = true;
+        console.error(
+          `\n⚠️ NO SE PUDO RESTAURAR LA CONTRASEÑA. La cuenta ${EMAIL} quedó ` +
+            `con la temporal de esta corrida: ${passwordEnPie}\n` +
+            "Restaurala a mano: " +
+            `npx convex run seed:resetearPasswords '{"password":"..."}'`,
+        );
+      }
     } else {
-      console.log("\n⚠️ NO se pudo restaurar la contraseña.");
+      restauracionFallo = true;
+      console.error(
+        `\n⚠️ NO SE PUDO RESTAURAR LA CONTRASEÑA (ni siquiera pude entrar con ` +
+          `la temporal). La cuenta ${EMAIL} quedó en un estado desconocido: ` +
+          `probá entrar con ${passwordEnPie} o con ${PASSWORD_ORIGINAL}.\n` +
+          "Arreglalo a mano: " +
+          `npx convex run seed:resetearPasswords '{"password":"..."}'`,
+      );
     }
   }
 }
@@ -272,4 +298,10 @@ console.log(
     ? "\nTodas las invariantes se sostienen."
     : `\nFALLARON ${fallos.length}: ${fallos.join(" · ")}`,
 );
-process.exit(fallos.length === 0 ? 0 : 1);
+if (restauracionFallo) {
+  console.error(
+    "\nEXIT 1 forzado por la restauración fallida, aunque las invariantes " +
+      "de arriba se hayan sostenido: la cuenta no quedó en su estado original.",
+  );
+}
+process.exit(fallos.length === 0 && !restauracionFallo ? 0 : 1);

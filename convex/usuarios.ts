@@ -994,9 +994,18 @@ export const cambiarPassword = action({
     // comprobación que separa "cambio mi contraseña" de "cambio la de otro" si
     // esa invariante se rompiera por deuda de datos, así que se afirma explícita
     // y ANTES de revocar o escribir nada.
-    if (cuenta.user._id !== credencial.userId) {
+    //
+    // ⚠️ `cuenta.user` puede ser `null`: `retrieveAccountWithCredentialsImpl`
+    // hace `ctx.db.get(existingAccount.userId)` sin comprobar el resultado
+    // (`mutations/retrieveAccountWithCredentials.js:35`), así que una
+    // credencial huérfana (fila en `authAccounts` sin su `users` — la misma
+    // clase de deuda de datos que ya documenta `_buscarPorEmail` más arriba)
+    // NO tira un error de la librería: hay que comprobarlo antes de leer
+    // `.user._id`, o el fallo sale como TypeError opaco en vez de un mensaje
+    // legible.
+    if (cuenta.user === null || cuenta.user._id !== credencial.userId) {
       console.error(
-        "GER-218: la credencial resuelta no pertenece a quien llama; abortado.",
+        "GER-218: la credencial resuelta no pertenece a quien llama (o está huérfana); abortado.",
       );
       throw new ConvexError("No pudimos verificar tu contraseña actual.");
     }

@@ -35,12 +35,25 @@ export function useNavItems() {
  * cierra, después se navega.
  *
  * `replace` y no `push`: el historial no debe poder volver a la app ya cerrada.
+ *
+ * ⚠️ Si `signOut()` falla (red caída, Convex inalcanzable), se navega a
+ * `/login` IGUAL: quedarse en la pantalla con el botón en `loading` para
+ * siempre es peor que un login que, en el peor caso, redirige de vuelta a
+ * `/hoy` porque el token todavía no venció. El fallo queda en consola para
+ * poder diagnosticarlo, nunca silencioso.
  */
 export function useCerrarSesion() {
   const router = useRouter();
   const { signOut } = useAuthActions();
   return useCallback(async () => {
-    await signOut();
+    try {
+      await signOut();
+    } catch (error) {
+      console.error(
+        "No se pudo cerrar la sesión en el servidor:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     router.replace("/login");
   }, [router, signOut]);
 }
