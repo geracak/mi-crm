@@ -1,14 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { LogOut } from "lucide-react";
-import { useAuthActions } from "@convex-dev/auth/react";
 import { cn } from "@/lib/utils";
 import { Avatar } from "@/components/ui/Avatar";
-import { Button } from "@/components/ui/Button";
-import { Overlay } from "@/components/ui/Overlay";
+import { CerrarSesionOverlay } from "@/components/overlays/CerrarSesionOverlay";
 import { useNavItems, useUsuarioActual } from "@/lib/useSesion";
 
 const ROL_LABEL: Record<"propietaria" | "comercial", string> = {
@@ -18,18 +16,9 @@ const ROL_LABEL: Record<"propietaria" | "comercial", string> = {
 
 export function Sidebar() {
   const pathname = usePathname();
-  const router = useRouter();
-  const { signOut } = useAuthActions();
   const navItems = useNavItems();
   const user = useUsuarioActual();
   const [confirmar, setConfirmar] = useState(false);
-  const [saliendo, setSaliendo] = useState(false);
-
-  async function cerrarSesion() {
-    setSaliendo(true);
-    await signOut();
-    router.replace("/login");
-  }
 
   return (
     <aside className="hidden h-full w-60 shrink-0 flex-col gap-1 border-r border-border bg-surface p-3.5 md:flex">
@@ -88,34 +77,9 @@ export function Sidebar() {
         </button>
       </div>
 
-      <Overlay
-        open={confirmar}
-        onClose={() => setConfirmar(false)}
-        title="Cerrar sesión"
-        footer={
-          <div className="flex justify-end gap-2">
-            <Button
-              variant="secondary"
-              size="compact"
-              onClick={() => setConfirmar(false)}
-            >
-              Cancelar
-            </Button>
-            <Button
-              variant="destructive"
-              size="compact"
-              loading={saliendo}
-              onClick={cerrarSesion}
-            >
-              Cerrar sesión
-            </Button>
-          </div>
-        }
-      >
-        <p className="text-[15px] text-text-muted">
-          ¿Seguro que quieres cerrar sesión?
-        </p>
-      </Overlay>
+      {confirmar && (
+        <CerrarSesionOverlay onClose={() => setConfirmar(false)} />
+      )}
     </aside>
   );
 }

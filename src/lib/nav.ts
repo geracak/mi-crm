@@ -27,3 +27,13 @@ export const SECTION_TITLES: Record<string, string> = {
 export function esFichaCliente(pathname: string): boolean {
   return /^\/clientes\/[^/]+$/.test(pathname);
 }
+
+/**
+ * GER-218 — Pantallas que se abren "encima" de la navegación: sin barra inferior
+ * y con botón atrás. `/cuenta` es una de ellas aunque sea una ruta de primer
+ * nivel — no es una pestaña, se entra por el avatar (así lo hace el prototipo:
+ * `showTabbar: !perfilOpen`, `showBack: … || perfilOpen`).
+ */
+export function esPantallaPush(pathname: string): boolean {
+  return esFichaCliente(pathname) || pathname === "/cuenta";
+}

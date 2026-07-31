@@ -1,13 +1,20 @@
 import { v, ConvexError } from "convex/values";
 import {
   query,
+  mutation,
   action,
   internalQuery,
   internalMutation,
 } from "./_generated/server";
 import type { QueryCtx } from "./_generated/server";
 import type { DataModel, Doc, Id } from "./_generated/dataModel";
-import { createAccount, invalidateSessions } from "@convex-dev/auth/server";
+import {
+  createAccount,
+  invalidateSessions,
+  getAuthSessionId,
+  retrieveAccount,
+  modifyAccountCredentials,
+} from "@convex-dev/auth/server";
 import { api, internal } from "./_generated/api";
 import { requireUsuario, requirePropietaria } from "./authz";
 import { normalizarEmail, ventanaCodigoMs } from "./emailUtils";
@@ -788,3 +795,237 @@ export const invitar = action({
 function secretoAleatorio(): string {
   return `${crypto.randomUUID()}${crypto.randomUUID()}`;
 }
+
+// ---------------------------------------------------------------------------
+// GER-218 — Perfil / Mi cuenta. Todo lo de abajo lo ejecuta cada persona SOBRE
+// SÍ MISMA: el id sale siempre de la sesión, nunca de los argumentos.
+// ---------------------------------------------------------------------------
+
+/**
+ * GER-218 — Longitud mínima de la contraseña. Esta constante es LA AUTORIDAD.
+ *
+ * ⚠️ No la valida la librería por este camino. `modifyAccountCredentials` solo
+ * busca la fila y la hashea (`dist/server/implementation/mutations/
+ * modifyAccount.js:8-27` → `.../provider.js:1-10`); el mínimo de 8 de
+ * `@convex-dev/auth` vive ÚNICAMENTE dentro del `authorize` del provider
+ * Password y solo para los flujos `signUp` y `reset-verification`
+ * (`dist/providers/Password.js:44-55` y `:171-174`), que esta ruta no atraviesa.
+ *
+ * El cliente tiene su propia copia en `src/lib/password.ts` para avisar antes de
+ * enviar; es UX, no control. Si cambia una, cambiar la otra.
+ */
+const MIN_PASSWORD = 8;
+
+/**
+ * GER-218 — Corrige tu propio nombre desde /cuenta.
+ *
+ * Lo puede hacer cualquiera con acceso, sin pasar por la dueña: el nombre no da
+ * permisos, solo firma interacciones y ventas. El correo NO se toca acá (mover
+ * la identidad es lo que hace `usuarios:actualizar`, restringido a la dueña).
+ */
+export const actualizarNombre = mutation({
+  args: { nombre: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const yo = await requireUsuario(ctx);
+
+    const nombre = args.nombre.trim();
+    if (nombre.length === 0) throw new ConvexError("El nombre es obligatorio");
+
+    // Sin cambios, sin escritura: evita invalidar las queries suscritas al
+    // usuario por guardar exactamente lo mismo que ya había.
+    if (nombre === yo.name) return null;
+
+    await ctx.db.patch(yo._id, { name: nombre });
+    return null;
+  },
+});
+
+/**
+ * GER-218 — La credencial de contraseña de QUIEN LLAMA, para `cambiarPassword`.
+ *
+ * ⚠️ Se lee de `authAccounts`, NO de `users.email`. El login por contraseña
+ * identifica la cuenta por `providerAccountId` y en este proyecto los dos
+ * valores ya divergieron una vez de verdad (ver
+ * `authMaintenance.ts::migrarIdentificadorPassword`): usar el correo del perfil
+ * podría apuntar a una credencial que no es la suya, o a ninguna.
+ *
+ * Los dos casos degenerados salen con un mensaje que la persona pueda entender,
+ * nunca con un crash. `take(2)` y rechazo en vez de `first()`: no se elige una
+ * fila al azar, mismo criterio que `validarActualizacion` y `_actualizarFilas`.
+ */
+export const _credencialPropia = internalQuery({
+  args: {},
+  returns: v.object({
+    userId: v.id("users"),
+    providerAccountId: v.string(),
+  }),
+  handler: async (ctx) => {
+    const yo = await requireUsuario(ctx);
+
+    const cuentas = await ctx.db
+      .query("authAccounts")
+      .withIndex("userIdAndProvider", (q) =>
+        q.eq("userId", yo._id).eq("provider", "password"),
+      )
+      .take(2);
+
+    if (cuentas.length === 0) {
+      throw new ConvexError(
+        "Tu cuenta no tiene una contraseña que cambiar. Cerrá sesión y usá «¿Olvidaste tu contraseña?» para crear una.",
+      );
+    }
+    if (cuentas.length > 1) {
+      throw new ConvexError(
+        "Esa cuenta tiene más de una credencial de contraseña. Abortado sin cambiar nada.",
+      );
+    }
+
+    return { userId: yo._id, providerAccountId: cuentas[0].providerAccountId };
+  },
+});
+
+/**
+ * GER-218 — Cambiá tu propia contraseña desde /cuenta.
+ *
+ * Es una `action` porque `retrieveAccount` y `modifyAccountCredentials` llaman
+ * por dentro a `ctx.runMutation("auth:store")` y eso no se puede hacer desde una
+ * mutation.
+ *
+ * ⚠️ EL ORDEN ES EL CONTRATO. Verificar → revocar → escribir.
+ *
+ * `invalidateSessions` y `modifyAccountCredentials` son transacciones separadas,
+ * no atómicas entre sí (dos llamadas distintas a `auth:store`). Si se escribiera
+ * primero, un fallo entre ambas dejaría la contraseña YA rotada y las demás
+ * sesiones vivas — lo contrario exacto de lo que promete la pantalla, y encima
+ * con la UI diciendo que la operación falló. Al revés, el peor caso es "se
+ * cerraron sesiones de más y la contraseña sigue siendo la vieja": molesto,
+ * nunca inseguro. Es el mismo criterio ya sellado en `actualizar` (más arriba en
+ * este archivo).
+ *
+ * Y la verificación va ANTES de revocar: si no, teclear mal la contraseña sería
+ * una forma trivial de echar a alguien de todos sus dispositivos.
+ *
+ * ⚠️ Residual conocido y aceptado (GER-244): entre revocar y escribir queda una
+ * ventana en la que un login con la contraseña VIEJA crea una sesión que ninguna
+ * de las dos operaciones alcanza. Cerrarla exige atomicidad que la librería hoy
+ * no ofrece.
+ *
+ * ⚠️ Qué revoca exactamente `invalidateSessions`, para no prometer de más: borra
+ * la fila de `authSessions` y sus refresh tokens, así que el otro dispositivo no
+ * puede renovar y queda fuera. Pero el ACCESS TOKEN que ya tenga en la mano es un
+ * JWT sin estado, válido hasta que caduque —1 hora por defecto
+ * (`implementation/tokens.js:4`)— porque `ctx.auth.getUserIdentity()` verifica la
+ * firma y NO consulta `authSessions`. O sea: el acceso se corta en ≤1 h, no en el
+ * instante. No es algo que introduzca esta pantalla: `usuarios:actualizar` tiene
+ * exactamente la misma propiedad. (`eliminar` es el caso distinto: al borrar la
+ * fila de `users`, `requireUsuario` corta en el acto.)
+ */
+export const cambiarPassword = action({
+  args: { passwordActual: v.string(), passwordNueva: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args): Promise<null> => {
+    // La sesión actual es la única que NO se revoca. Sin este id habría que
+    // pasar `except` vacío y el cambio de contraseña te echaría a vos mismo.
+    // Con sesión válida esto nunca es null (lee el mismo `getUserIdentity` que
+    // `requireUsuario`); la comprobación es defensa en profundidad.
+    const sessionId = await getAuthSessionId(ctx);
+    if (sessionId === null) {
+      throw new ConvexError("Tu sesión expiró. Volvé a entrar.");
+    }
+
+    // Antes de producir NINGÚN efecto. Ver `MIN_PASSWORD`: acá no hay red debajo.
+    if (args.passwordNueva.length < MIN_PASSWORD) {
+      throw new ConvexError(
+        `La contraseña debe tener al menos ${MIN_PASSWORD} caracteres.`,
+      );
+    }
+    if (args.passwordNueva === args.passwordActual) {
+      throw new ConvexError("La contraseña nueva tiene que ser distinta.");
+    }
+
+    const credencial = await ctx.runQuery(
+      internal.usuarios._credencialPropia,
+      {},
+    );
+
+    // Verifica la contraseña actual. `retrieveAccount` aplica por dentro el
+    // límite de intentos de la librería (10 fallos/hora sobre esta cuenta:
+    // `isSignInRateLimited` → `Provider.verify` → `recordFailedSignIn`), así que
+    // el mismo control que protege el login protege esto.
+    //
+    // Devuelve un `Error` PELADO con un código dentro (no un `ConvexError`), así
+    // que sin este catch el cliente vería "Server Error" y nada más.
+    const cuenta = await retrieveAccount<DataModel>(ctx, {
+      provider: "password",
+      account: {
+        id: credencial.providerAccountId,
+        secret: args.passwordActual,
+      },
+    }).catch((error: unknown) => {
+      // ⚠️ Solo el mensaje, NUNCA el error entero ni los args: por ahí viajan
+      // las dos contraseñas en claro (misma regla que el wrapper de `auth.ts`).
+      const codigo = error instanceof Error ? error.message : String(error);
+      if (codigo.includes("TooManyFailedAttempts")) {
+        throw new ConvexError({
+          mensaje:
+            "Demasiados intentos fallidos. Probá de nuevo dentro de una hora.",
+        });
+      }
+      if (codigo.includes("InvalidSecret")) {
+        // El `codigo` deja que la pantalla ofrezca la salida a quien entra con
+        // Google y nunca eligió contraseña: no hay ningún dato que permita
+        // distinguirla de antemano (`passwordPendiente` se apaga al entrar por
+        // Google — ver `apagarPendienteSiGoogle` en `auth.ts`), así que el
+        // fallo de la contraseña actual es el único momento donde se sabe.
+        throw new ConvexError({
+          codigo: "PASSWORD_ACTUAL_INCORRECTA",
+          mensaje: "La contraseña actual no es correcta.",
+        });
+      }
+      console.error("GER-218: no se pudo verificar la contraseña:", codigo);
+      throw new ConvexError({
+        mensaje: "No pudimos verificar tu contraseña actual.",
+      });
+    });
+
+    // La cuenta se resolvió por `providerAccountId`, no por la sesión. Que
+    // coincida con quien llama es invariante del paso anterior — pero es la
+    // comprobación que separa "cambio mi contraseña" de "cambio la de otro" si
+    // esa invariante se rompiera por deuda de datos, así que se afirma explícita
+    // y ANTES de revocar o escribir nada.
+    //
+    // ⚠️ `cuenta.user` puede ser `null`: `retrieveAccountWithCredentialsImpl`
+    // hace `ctx.db.get(existingAccount.userId)` sin comprobar el resultado
+    // (`mutations/retrieveAccountWithCredentials.js:35`), así que una
+    // credencial huérfana (fila en `authAccounts` sin su `users` — la misma
+    // clase de deuda de datos que ya documenta `_buscarPorEmail` más arriba)
+    // NO tira un error de la librería: hay que comprobarlo antes de leer
+    // `.user._id`, o el fallo sale como TypeError opaco en vez de un mensaje
+    // legible.
+    if (cuenta.user === null || cuenta.user._id !== credencial.userId) {
+      console.error(
+        "GER-218: la credencial resuelta no pertenece a quien llama (o está huérfana); abortado.",
+      );
+      throw new ConvexError("No pudimos verificar tu contraseña actual.");
+    }
+
+    // REVOCAR primero (ver el comentario de arriba), preservando la sesión desde
+    // la que se está haciendo el cambio.
+    await invalidateSessions<DataModel>(ctx, {
+      userId: credencial.userId,
+      except: [sessionId],
+    });
+
+    // …y escribir después.
+    await modifyAccountCredentials<DataModel>(ctx, {
+      provider: "password",
+      account: {
+        id: credencial.providerAccountId,
+        secret: args.passwordNueva,
+      },
+    });
+
+    return null;
+  },
+});

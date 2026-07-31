@@ -243,3 +243,28 @@ grep '^CONVEX_DEPLOY_KEY=' "$RUTA/clave.env" | cut -d= -f2- \
 
 Y para relanzar el build sobre el commit nuevo (no sobre el deployment activo,
 que tras un fallo es el viejo): `railway redeploy --from-source -y`.
+
+---
+
+## 2026-07-31 · Un `.mjs` en el scratchpad no resuelve las dependencias del proyecto
+
+**Categoría:** tooling / Node
+
+**Qué pasó:** al escribir una prueba desechable que importa `convex/browser`, se guardó en el
+directorio scratchpad de la sesión y se ejecutó desde ahí. Node falló con
+`ERR_MODULE_NOT_FOUND: Cannot find package 'convex'`.
+
+**Causa raíz:** la resolución de módulos ESM sube por el árbol de directorios desde el
+ARCHIVO, no desde el `cwd`. Un script fuera del repo nunca ve su `node_modules`, y `NODE_PATH`
+no aplica a ESM.
+
+**Regla preventiva:** un script desechable que importe dependencias del proyecto va DENTRO del
+repo (`./_tmp-*.mjs`), se ejecuta y se borra en el mismo comando:
+
+```bash
+cp "$SCRATCH/prueba.mjs" ./_tmp-prueba.mjs && node ./_tmp-prueba.mjs; rm -f ./_tmp-prueba.mjs
+```
+
+El scratchpad sigue siendo el sitio correcto para lo que NO importa dependencias.
+
+**Verificación:** `git status --short` sin rastro del `_tmp-*` antes de commitear.
