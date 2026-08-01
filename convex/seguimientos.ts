@@ -9,6 +9,19 @@ import { assertFechaISO } from "./fechas";
  * responsable. Regla de producto (TAL-16): NO se filtra por responsable —
  * todo el equipo ve todos los pendientes. La clasificación atrasado/hoy/próximo
  * es presentacional y se hace en el cliente con la fecha local del navegador.
+ *
+ * GER-249 — Cliente, responsable y estado se resuelven UNA VEZ por id único, no
+ * una vez por fila: antes, dos pendientes del mismo cliente pagaban dos `db.get`
+ * del cliente, dos del responsable y dos recorridos de sus ventas, todos
+ * idénticos. Pasa de `1 + 3P` a `1 + 2·(clientes únicos) + (responsables únicos)`.
+ *
+ * ⚠️ El estado se resuelve con `estadoDe` (índice `ventas.by_cliente_fecha`, una
+ * consulta ACOTADA por cliente), NO con un `collect()` de toda la tabla `ventas`:
+ * esta función no lista todos los clientes del negocio, solo los que tienen
+ * pendientes — un `collect()` global leería ventas de clientes que ni aparecen
+ * en el resultado (con 0 pendientes, leería la tabla entera igual). Ese es el
+ * error que corrigió esta misma línea tras la revisión: `listarConEstado` SÍ
+ * puede agrupar toda `ventas` porque ahí sí se listan todos los clientes; aquí no.
  */
 export const pendientesConCliente = query({
   args: {},
@@ -31,22 +44,31 @@ export const pendientesConCliente = query({
       .withIndex("by_hecho_vence", (q) => q.eq("hecho", false))
       .collect();
     pend.sort((a, b) => a.vence.localeCompare(b.vence));
-    return await Promise.all(
-      pend.map(async (s) => {
-        const cliente = await ctx.db.get(s.clienteId);
-        const responsable = await ctx.db.get(s.responsableId);
-        return {
-          _id: s._id,
-          accion: s.accion,
-          vence: s.vence,
-          clienteId: s.clienteId,
-          clienteNombre: cliente?.nombre ?? "(cliente eliminado)",
-          clienteEstado: await estadoDe(ctx, s.clienteId),
-          responsableId: s.responsableId,
-          responsableNombre: responsable?.name,
-        };
-      }),
+
+    const clienteIds = [...new Set(pend.map((s) => s.clienteId))];
+    const responsableIds = [...new Set(pend.map((s) => s.responsableId))];
+
+    const [clientes, responsables, estados] = await Promise.all([
+      Promise.all(clienteIds.map((id) => ctx.db.get(id))),
+      Promise.all(responsableIds.map((id) => ctx.db.get(id))),
+      Promise.all(clienteIds.map((id) => estadoDe(ctx, id))),
+    ]);
+    const clientePorId = new Map(clienteIds.map((id, i) => [id, clientes[i]]));
+    const responsablePorId = new Map(
+      responsableIds.map((id, i) => [id, responsables[i]]),
     );
+    const estadoPorCliente = new Map(clienteIds.map((id, i) => [id, estados[i]]));
+
+    return pend.map((s) => ({
+      _id: s._id,
+      accion: s.accion,
+      vence: s.vence,
+      clienteId: s.clienteId,
+      clienteNombre: clientePorId.get(s.clienteId)?.nombre ?? "(cliente eliminado)",
+      clienteEstado: estadoPorCliente.get(s.clienteId) ?? "nuevo_lead",
+      responsableId: s.responsableId,
+      responsableNombre: responsablePorId.get(s.responsableId)?.name,
+    }));
   },
 });
 
