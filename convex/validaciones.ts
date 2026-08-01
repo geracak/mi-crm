@@ -14,6 +14,30 @@
 import { ConvexError } from "convex/values";
 import { normalizarEmail } from "./emailUtils";
 
+// GER-251 — Cotas de longitud para los campos de texto libre que no tenían
+// ninguna (salvo `concepto` y `texto`, que ya las traían desde el alta). Los
+// valores son los que aprobó Gerardo en el plan de la auditoría; ajustables
+// si en uso real resultan molestos, pero no antes.
+export const MAX_NOMBRE_CLIENTE = 120;
+export const MAX_EMPRESA = 120;
+export const MAX_TELEFONO = 40;
+export const MAX_EMAIL = 254;
+export const MAX_NOTA = 2000;
+export const MAX_ACCION = 200;
+/** Nombre de una persona del equipo — tres writers reales, ver GER-251. */
+export const MAX_NOMBRE_PERSONA = 120;
+
+/**
+ * Mismo idioma que `conceptoValido`/`importeValido` de `convex/ventas.ts`: el
+ * caller ya hizo `trim()` y comprobó que no esté vacío (cada campo tiene su
+ * propio mensaje para eso); esta función solo añade el techo de longitud.
+ */
+export function assertLongitudMax(valor: string, max: number, etiqueta: string): void {
+  if (valor.length > max) {
+    throw new ConvexError(`${etiqueta} es demasiado largo (máx. ${max} caracteres)`);
+  }
+}
+
 /**
  * Normaliza un email opcional y comprueba que diga algo parecido a un correo.
  *
@@ -32,5 +56,6 @@ export function emailClienteOpcional(email: string | undefined): string | undefi
   if (!limpio.includes("@")) {
     throw new ConvexError("Indica un correo válido");
   }
+  assertLongitudMax(limpio, MAX_EMAIL, "El correo");
   return limpio;
 }

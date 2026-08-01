@@ -2,6 +2,7 @@ import { v, ConvexError } from "convex/values";
 import { internalMutation } from "./_generated/server";
 import type { Doc } from "./_generated/dataModel";
 import { normalizarEmail, ventanaCodigoMs } from "./emailUtils";
+import { assertLongitudMax, MAX_EMAIL } from "./validaciones";
 
 const UNA_HORA_MS = 60 * 60 * 1000;
 
@@ -149,6 +150,10 @@ export const migrarIdentificadorPassword = internalMutation({
         `Destino inválido: "${args.emailNuevo}". Debe ser un correo real (no vacío, con "@" y fuera de .local).`,
       );
     }
+    // GER-251 — Este writer de `users.email` se escapó de la primera pasada de
+    // cotas: es una migración de mantenimiento, no un alta/edición ordinaria,
+    // pero escribe el mismo campo y tiene que respetar la misma cota.
+    assertLongitudMax(destino, MAX_EMAIL, "El correo");
 
     /** Describe a quién pertenece una cuenta, para que ningún resultado sea anónimo. */
     const describir = async (cuenta: Doc<"authAccounts">) => {

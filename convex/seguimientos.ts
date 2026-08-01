@@ -2,7 +2,8 @@ import { v, ConvexError } from "convex/values";
 import { query, mutation } from "./_generated/server";
 import { requireUsuario } from "./authz";
 import { estadoDe, ESTADO_CLIENTE } from "./clientes";
-import { assertFechaISO } from "./fechas";
+import { assertFechaISO, assertNoPosteriorAHoyMundial } from "./fechas";
+import { assertLongitudMax, MAX_ACCION } from "./validaciones";
 
 /**
  * Todos los seguimientos pendientes del negocio, con datos del cliente y del
@@ -179,6 +180,7 @@ export const crear = mutation({
     const usuario = await requireUsuario(ctx);
     const accion = args.accion.trim();
     if (accion.length === 0) throw new ConvexError("Indica qué hay que hacer");
+    assertLongitudMax(accion, MAX_ACCION, "La acción");
     // Sin cota superior: un seguimiento se programa hacia el futuro.
     assertFechaISO(args.vence);
     const cliente = await ctx.db.get(args.clienteId);
@@ -201,15 +203,26 @@ export const crear = mutation({
   },
 });
 
-/** Marca un seguimiento como hecho. `fechaHecho` = fecha local del cliente. */
+/**
+ * Marca un seguimiento como hecho. `fechaHecho` = fecha local del cliente.
+ *
+ * GER-251 — Orden deliberado: existencia → idempotencia → formato → rango →
+ * escritura. El guard `if (s.hecho) return null` va ANTES de tocar cualquier
+ * dato del request (fecha incluida), simétrico al `if (!s.hecho) return null`
+ * de `deshacer` más abajo. Sin él, re-invocar esta mutación sobre un
+ * seguimiento ya cerrado sobrescribía `completadoPorId` — y con eso, el
+ * derecho exclusivo a deshacerlo que `deshacer` reserva a quien lo completó.
+ */
 export const marcarHecho = mutation({
   args: { id: v.id("seguimientos"), fechaHecho: v.string() },
   returns: v.null(),
   handler: async (ctx, args) => {
     const usuario = await requireUsuario(ctx);
-    assertFechaISO(args.fechaHecho);
     const s = await ctx.db.get(args.id);
     if (s === null) throw new ConvexError("Seguimiento no encontrado");
+    if (s.hecho) return null;
+    assertFechaISO(args.fechaHecho);
+    assertNoPosteriorAHoyMundial(args.fechaHecho, "seguimientos");
     await ctx.db.patch(args.id, {
       hecho: true,
       fechaHecho: args.fechaHecho,

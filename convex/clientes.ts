@@ -4,7 +4,14 @@ import type { QueryCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { requireUsuario } from "./authz";
 import { normalizarEmail } from "./emailUtils";
-import { emailClienteOpcional } from "./validaciones";
+import {
+  emailClienteOpcional,
+  assertLongitudMax,
+  MAX_NOMBRE_CLIENTE,
+  MAX_EMPRESA,
+  MAX_TELEFONO,
+  MAX_NOTA,
+} from "./validaciones";
 
 export const ESTADO_CLIENTE = v.union(
   v.literal("nuevo_lead"),
@@ -221,18 +228,24 @@ export const crear = mutation({
     await requireUsuario(ctx);
     const nombre = args.nombre.trim();
     if (nombre.length === 0) throw new ConvexError("El nombre es obligatorio");
+    assertLongitudMax(nombre, MAX_NOMBRE_CLIENTE, "El nombre");
+    const empresa = args.empresa?.trim() || undefined;
+    if (empresa !== undefined) assertLongitudMax(empresa, MAX_EMPRESA, "La empresa");
     const telefono = args.telefono?.trim() || undefined;
+    if (telefono !== undefined) assertLongitudMax(telefono, MAX_TELEFONO, "El teléfono");
     const email = emailClienteOpcional(args.email);
     if (!telefono && !email) {
       throw new ConvexError("Indica al menos un teléfono o un email");
     }
+    const nota = args.nota?.trim() || undefined;
+    if (nota !== undefined) assertLongitudMax(nota, MAX_NOTA, "La nota");
     return await ctx.db.insert("clientes", {
       nombre,
-      empresa: args.empresa?.trim() || undefined,
+      empresa,
       telefono,
       email,
       canalOrigen: args.canalOrigen,
-      nota: args.nota?.trim() || undefined,
+      nota,
     });
   },
 });
@@ -257,7 +270,11 @@ export const actualizar = mutation({
     if (cliente === null) throw new ConvexError("Cliente no encontrado");
     const nombre = args.nombre.trim();
     if (nombre.length === 0) throw new ConvexError("El nombre es obligatorio");
+    assertLongitudMax(nombre, MAX_NOMBRE_CLIENTE, "El nombre");
+    const empresa = args.empresa?.trim() || undefined;
+    if (empresa !== undefined) assertLongitudMax(empresa, MAX_EMPRESA, "La empresa");
     const telefono = args.telefono?.trim() || undefined;
+    if (telefono !== undefined) assertLongitudMax(telefono, MAX_TELEFONO, "El teléfono");
     const email = emailClienteOpcional(args.email);
     if (!telefono && !email) {
       throw new ConvexError("Indica al menos un teléfono o un email");
@@ -265,7 +282,7 @@ export const actualizar = mutation({
     // patch con `undefined` borra el campo opcional (empresa/teléfono/email vaciados).
     await ctx.db.patch(args.id, {
       nombre,
-      empresa: args.empresa?.trim() || undefined,
+      empresa,
       telefono,
       email,
     });

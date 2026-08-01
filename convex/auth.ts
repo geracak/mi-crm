@@ -8,6 +8,7 @@ import type { ActionCtx, MutationCtx } from "./_generated/server";
 import { ResendOTP } from "./ResendOTP";
 import { normalizarEmail, ventanaCodigoMs } from "./emailUtils";
 import { origenesPermitidos, resolverDestino } from "./redirectOrigins";
+import { assertLongitudMax, MAX_NOMBRE_PERSONA, MAX_EMAIL } from "./validaciones";
 
 /**
  * GER-240 — Mensaje ÚNICO de rechazo del registro. Se usa igual en el wrapper y
@@ -395,9 +396,22 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
       if (rol !== "propietaria" && rol !== "comercial") {
         throw new ConvexError(REGISTRO_NO_PERMITIDO);
       }
+      // GER-251 — Defensa final de longitud, mismo idioma que el control de rol
+      // de arriba: `usuarios.invitar` ya valida antes de llegar acá, pero esta
+      // rama también la alcanza `seed.ts` directamente, sin pasar por `invitar`.
+      const nombreProfile =
+        typeof profile.name === "string" ? profile.name : undefined;
+      const emailProfile =
+        typeof profile.email === "string" ? profile.email : undefined;
+      if (nombreProfile !== undefined) {
+        assertLongitudMax(nombreProfile, MAX_NOMBRE_PERSONA, "El nombre");
+      }
+      if (emailProfile !== undefined) {
+        assertLongitudMax(emailProfile, MAX_EMAIL, "El correo");
+      }
       return await ctx.db.insert("users", {
-        email: typeof profile.email === "string" ? profile.email : undefined,
-        name: typeof profile.name === "string" ? profile.name : undefined,
+        email: emailProfile,
+        name: nombreProfile,
         rol,
         // GER-219 — UN campo más, nombrado explícitamente. Sigue sin haber
         // spread del `profile`: esta lista blanca es el control que endureció
