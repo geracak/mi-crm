@@ -19,6 +19,7 @@ import { api, internal } from "./_generated/api";
 import { requireUsuario, requirePropietaria } from "./authz";
 import { normalizarEmail, ventanaCodigoMs } from "./emailUtils";
 import { faltaConfigDeEnvio } from "./ResendOTP";
+import { assertLongitudMax, MAX_NOMBRE_PERSONA, MAX_EMAIL } from "./validaciones";
 
 const ROL = v.union(v.literal("propietaria"), v.literal("comercial"));
 
@@ -440,11 +441,13 @@ async function validarActualizacion(
 
   const nombre = args.nombre.trim();
   if (nombre.length === 0) throw new ConvexError("El nombre es obligatorio");
+  assertLongitudMax(nombre, MAX_NOMBRE_PERSONA, "El nombre");
 
   const email = normalizarEmail(args.email);
   if (email.length === 0 || !email.includes("@")) {
     throw new ConvexError("Indica un correo válido");
   }
+  assertLongitudMax(email, MAX_EMAIL, "El correo");
 
   // El negocio no puede quedarse sin ninguna dueña.
   if (objetivo.rol === "propietaria" && args.rol !== "propietaria") {
@@ -733,11 +736,13 @@ export const invitar = action({
 
     const nombre = args.nombre.trim();
     if (nombre.length === 0) throw new ConvexError("El nombre es obligatorio");
+    assertLongitudMax(nombre, MAX_NOMBRE_PERSONA, "El nombre");
 
     const email = normalizarEmail(args.email);
     if (email.length === 0 || !email.includes("@")) {
       throw new ConvexError("Indica un correo válido");
     }
+    assertLongitudMax(email, MAX_EMAIL, "El correo");
 
     if (await ctx.runQuery(internal.usuarios._buscarPorEmail, { email })) {
       throw new ConvexError("Ya hay una persona con ese correo en el equipo.");
@@ -831,6 +836,7 @@ export const actualizarNombre = mutation({
 
     const nombre = args.nombre.trim();
     if (nombre.length === 0) throw new ConvexError("El nombre es obligatorio");
+    assertLongitudMax(nombre, MAX_NOMBRE_PERSONA, "El nombre");
 
     // Sin cambios, sin escritura: evita invalidar las queries suscritas al
     // usuario por guardar exactamente lo mismo que ya había.
