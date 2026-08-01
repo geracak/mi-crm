@@ -1,14 +1,20 @@
 import { v, ConvexError } from "convex/values";
 import { query, mutation } from "./_generated/server";
 import { requireUsuario } from "./authz";
-import { estadoDe, ESTADO_CLIENTE } from "./clientes";
+import { estadoDesdeVentas, ESTADO_CLIENTE } from "./clientes";
 import { assertFechaISO } from "./fechas";
+import type { Doc, Id } from "./_generated/dataModel";
 
 /**
  * Todos los seguimientos pendientes del negocio, con datos del cliente y del
  * responsable. Regla de producto (TAL-16): NO se filtra por responsable —
  * todo el equipo ve todos los pendientes. La clasificación atrasado/hoy/próximo
  * es presentacional y se hace en el cliente con la fecha local del navegador.
+ *
+ * GER-249 — Cliente, responsable y estado se resuelven UNA VEZ por id único, no
+ * una vez por fila: antes, dos pendientes del mismo cliente pagaban dos `db.get`
+ * del cliente, dos del responsable y dos recorridos de sus ventas, todos
+ * idénticos. Pasa de `1 + 3P` a `1 + 2·(clientes únicos) + (responsables únicos)`.
  */
 export const pendientesConCliente = query({
   args: {},
@@ -31,22 +37,44 @@ export const pendientesConCliente = query({
       .withIndex("by_hecho_vence", (q) => q.eq("hecho", false))
       .collect();
     pend.sort((a, b) => a.vence.localeCompare(b.vence));
-    return await Promise.all(
-      pend.map(async (s) => {
-        const cliente = await ctx.db.get(s.clienteId);
-        const responsable = await ctx.db.get(s.responsableId);
-        return {
-          _id: s._id,
-          accion: s.accion,
-          vence: s.vence,
-          clienteId: s.clienteId,
-          clienteNombre: cliente?.nombre ?? "(cliente eliminado)",
-          clienteEstado: await estadoDe(ctx, s.clienteId),
-          responsableId: s.responsableId,
-          responsableNombre: responsable?.name,
-        };
-      }),
+
+    const clienteIds = [...new Set(pend.map((s) => s.clienteId))];
+    const responsableIds = [...new Set(pend.map((s) => s.responsableId))];
+
+    const [clientes, responsables] = await Promise.all([
+      Promise.all(clienteIds.map((id) => ctx.db.get(id))),
+      Promise.all(responsableIds.map((id) => ctx.db.get(id))),
+    ]);
+    const clientePorId = new Map(clienteIds.map((id, i) => [id, clientes[i]]));
+    const responsablePorId = new Map(
+      responsableIds.map((id, i) => [id, responsables[i]]),
     );
+
+    // Estado por cliente único: una sola consulta agrupada, igual que en
+    // `listarConEstado` — mismo criterio, misma invariante (no hay ventas
+    // huérfanas: `ventas.crear` valida el cliente y `clienteId` no se edita).
+    const todasLasVentas = await ctx.db.query("ventas").collect();
+    const ventasPorCliente = new Map<Id<"clientes">, Doc<"ventas">[]>();
+    for (const venta of todasLasVentas) {
+      if (!clientePorId.has(venta.clienteId)) continue;
+      const grupo = ventasPorCliente.get(venta.clienteId);
+      if (grupo) grupo.push(venta);
+      else ventasPorCliente.set(venta.clienteId, [venta]);
+    }
+    const estadoPorCliente = new Map(
+      clienteIds.map((id) => [id, estadoDesdeVentas(ventasPorCliente.get(id) ?? [])]),
+    );
+
+    return pend.map((s) => ({
+      _id: s._id,
+      accion: s.accion,
+      vence: s.vence,
+      clienteId: s.clienteId,
+      clienteNombre: clientePorId.get(s.clienteId)?.nombre ?? "(cliente eliminado)",
+      clienteEstado: estadoPorCliente.get(s.clienteId) ?? "nuevo_lead",
+      responsableId: s.responsableId,
+      responsableNombre: responsablePorId.get(s.responsableId)?.name,
+    }));
   },
 });
 

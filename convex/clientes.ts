@@ -1,7 +1,7 @@
 import { v, ConvexError } from "convex/values";
 import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
 import type { QueryCtx } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
+import type { Doc, Id } from "./_generated/dataModel";
 import { requireUsuario } from "./authz";
 import { normalizarEmail } from "./emailUtils";
 import { emailClienteOpcional } from "./validaciones";
@@ -21,6 +21,19 @@ export const CANAL_ORIGEN = v.union(
 );
 
 /**
+ * GER-249 — Regla de estado (schema.ts), extraída a función PURA: recibe las ventas
+ * ya leídas y no toca la base. La comparte `estadoDe` (una consulta por cliente) y
+ * `listarConEstado` (una consulta agrupada para todos), así que las dos vías no
+ * pueden divergir — es literalmente la misma función.
+ */
+export function estadoDesdeVentas(ventas: Doc<"ventas">[]) {
+  if (ventas.length === 0) return "nuevo_lead" as const;
+  if (ventas.some((x) => x.estado === "abierta")) return "en_negociacion" as const;
+  if (ventas.some((x) => x.estado === "ganada")) return "ganado" as const;
+  return "perdido" as const;
+}
+
+/**
  * Estado calculado del cliente a partir de sus ventas (regla en schema.ts).
  * No es una función pública; se reutiliza desde otras funciones Convex.
  */
@@ -29,10 +42,7 @@ export async function estadoDe(ctx: QueryCtx, clienteId: Id<"clientes">) {
     .query("ventas")
     .withIndex("by_cliente_fecha", (q) => q.eq("clienteId", clienteId))
     .collect();
-  if (ventas.length === 0) return "nuevo_lead" as const;
-  if (ventas.some((x) => x.estado === "abierta")) return "en_negociacion" as const;
-  if (ventas.some((x) => x.estado === "ganada")) return "ganado" as const;
-  return "perdido" as const;
+  return estadoDesdeVentas(ventas);
 }
 
 /** Lista mínima de clientes para los selectores (Nueva tarea, etc.). */
@@ -49,10 +59,18 @@ export const listar = query({
 /**
  * Lista de clientes con estado calculado y "último contacto", para /clientes (F3).
  *
- * Escala MVP: `collect()` de toda la tabla + enriquecido N+1 por cliente (`estadoDe`
- * colecta ventas). Aceptable para decenas de clientes; a cientos/miles habría que
- * paginar o mover la búsqueda al servidor — NO dejar este patrón como implícito si
- * el volumen crece.
+ * GER-249 — El estado ya no cuesta una consulta a `ventas` POR CLIENTE: se lee la
+ * tabla `ventas` una sola vez y se agrupa en memoria por `clienteId`. Es correcto
+ * leer los mismos documentos que antes (ni uno más, ni uno menos) porque no hay
+ * ventas huérfanas — `ventas.crear` valida el cliente antes de insertar y
+ * `clienteId` nunca se modifica en `ventas.actualizar` — así que agrupar toda la
+ * tabla encuentra exactamente las mismas ventas que `estadoDe` habría leído cliente
+ * por cliente. Pasa de `1 + 2N` a `1 + N + 1` lecturas (clientes + ventas + la
+ * `.first()` de interacciones por cliente, que queda fuera de esta entrega).
+ *
+ * Escala MVP: sigue con `collect()` de toda la tabla. Aceptable para decenas de
+ * clientes; a cientos/miles habría que paginar o mover la búsqueda al servidor —
+ * NO dejar este patrón como implícito si el volumen crece.
  *
  * "Último contacto" = la interacción más reciente, leída del índice compuesto
  * `by_cliente_fecha` en orden descendente (una sola fila, sin collect+reduce).
@@ -72,10 +90,19 @@ export const listarConEstado = query({
   ),
   handler: async (ctx) => {
     await requireUsuario(ctx);
-    const clientes = await ctx.db.query("clientes").collect();
+    const [clientes, todasLasVentas] = await Promise.all([
+      ctx.db.query("clientes").collect(),
+      ctx.db.query("ventas").collect(),
+    ]);
+    const ventasPorCliente = new Map<Id<"clientes">, Doc<"ventas">[]>();
+    for (const venta of todasLasVentas) {
+      const grupo = ventasPorCliente.get(venta.clienteId);
+      if (grupo) grupo.push(venta);
+      else ventasPorCliente.set(venta.clienteId, [venta]);
+    }
     const filas = await Promise.all(
       clientes.map(async (c) => {
-        const estado = await estadoDe(ctx, c._id);
+        const estado = estadoDesdeVentas(ventasPorCliente.get(c._id) ?? []);
         const ultima = await ctx.db
           .query("interacciones")
           .withIndex("by_cliente_fecha", (q) => q.eq("clienteId", c._id))
