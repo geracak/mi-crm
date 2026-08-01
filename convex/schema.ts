@@ -108,8 +108,17 @@ export default defineSchema({
     nota: v.optional(v.string()),
     // "fecha de alta" = _creationTime (campo automático de Convex).
   })
-    .index("by_email", ["email"])
-    .searchIndex("search_nombre", { searchField: "nombre" }),
+    // GER-248 — `by_email` lo consulta `clientes:buscarPorEmail` para avisar de un
+    // posible duplicado antes de guardar. El email se guarda ya normalizado
+    // (`emailClienteOpcional`), así que la clave de búsqueda TAMBIÉN tiene que
+    // normalizarse en el servidor o el índice no casa.
+    //
+    // Aquí vivía además un `searchIndex("search_nombre")` que no consultaba nadie:
+    // la búsqueda de /clientes se hace en el navegador y cubre nombre Y email,
+    // mientras que el índice solo cubría nombre. Se retiró en vez de cablearlo
+    // porque habría sido un downgrade. Si algún día /clientes necesita paginar,
+    // la búsqueda en servidor vuelve como feature propia — con su índice entonces.
+    .index("by_email", ["email"]),
 
   interacciones: defineTable({
     clienteId: v.id("clientes"),

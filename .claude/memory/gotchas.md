@@ -268,3 +268,44 @@ cp "$SCRATCH/prueba.mjs" ./_tmp-prueba.mjs && node ./_tmp-prueba.mjs; rm -f ./_t
 El scratchpad sigue siendo el sitio correcto para lo que NO importa dependencias.
 
 **Verificación:** `git status --short` sin rastro del `_tmp-*` antes de commitear.
+
+---
+
+## 2026-08-01 · Cambiar un contrato de retorno sin rastrear a quién lo consume
+
+**Categoría:** planificación / Convex + React
+
+**Qué pasó:** el plan de GER-248 proponía que `clientes.crear` pasara de devolver
+`v.id("clientes")` a `{ id, duplicadoDe }` para transportar el aviso de duplicado. La
+auditoría lo tumbó: `NuevoClienteOverlay.tsx` usa ese retorno como `Id<"clientes">` para
+`onCreated(id)` y para `router.push(/clientes/${id}?nuevo=1)`, y `ProgramarSeguimientoOverlay`
+lo recibe en su callback. Implementado tal cual, habría navegado a
+`/clientes/[object Object]`. Además el aviso no tenía forma de cruzar la navegación hasta la
+ficha, cuyo toast se decide solo por `?nuevo=1` — y la salida rápida (meterlo en la URL)
+habría puesto un correo en el historial del navegador.
+
+**Causa raíz:** se listaron los archivos que había que EDITAR, no los que CONSUMEN el valor
+que se estaba cambiando. En Convex el retorno de una mutación es un contrato con la UI, y el
+typecheck solo lo delata si se corre — en fase de plan no hay typecheck.
+
+**Regla preventiva:** antes de proponer cualquier cambio en `args` o `returns` de una función
+Convex, hacer el rastreo COMPLETO de consumidores y pegarlo en el plan:
+
+```bash
+grep -rn "api\.<modulo>\.<funcion>" src/     # quién la llama
+# y para cada llamada, mirar qué se hace con el valor devuelto
+```
+
+Si el rastreo sale caro, es señal de que el contrato no se debe tocar: buscar un diseño que lo
+deje intacto. En GER-248 la solución fue justamente esa — mover el aviso a una query aparte,
+previa al guardado, y no tocar las firmas.
+
+**Segundo error de la misma sesión (misma familia):** al añadir `auth.ts` como punto de
+escritura de `users.name` en la entrega E3, se QUITÓ `usuarios.ts` de la lista de archivos.
+Corregir un punto no puede reducir la cobertura de los otros: `users.name` tiene TRES writers
+(`usuarios.ts:508` vía `/equipo`, `usuarios.ts:839` vía `/cuenta`, `auth.ts:398-400` vía
+`createAccount`). Al ampliar un inventario, RE-VERIFICAR el inventario entero, no sustituir
+un elemento por otro.
+
+**Verificación:** todo cambio de contrato o de inventario en un plan lleva pegada la salida
+literal del grep que lo respalda, no una afirmación de memoria.

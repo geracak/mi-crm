@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { AlertCircle } from "lucide-react";
 import { api, type Id } from "@/lib/convexApi";
+import { mensajeError } from "@/lib/errores";
 import { Overlay } from "@/components/ui/Overlay";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -45,6 +46,14 @@ export function NuevoClienteOverlay({ open, onClose, onCreated }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [guardando, setGuardando] = useState(false);
 
+  // GER-248 — Aviso de posible duplicado, ANTES de guardar. No bloquea el alta:
+  // la regla es avisar, no impedir. Se pide solo cuando lo escrito parece un
+  // correo, para no lanzar una consulta por cada tecla del campo.
+  const duplicado = useQuery(
+    api.clientes.buscarPorEmail,
+    open && email.includes("@") ? { email } : "skip",
+  );
+
   function reset() {
     setNombre("");
     setEmpresa("");
@@ -84,8 +93,10 @@ export function NuevoClienteOverlay({ open, onClose, onCreated }: Props) {
         // ?nuevo=1 dispara el toast "Cliente añadido" al aterrizar en la ficha.
         router.push(`/clientes/${id}?nuevo=1`);
       }
-    } catch {
-      setError("No se pudo guardar. Revisa los datos.");
+    } catch (e) {
+      // El mensaje real del servidor importa: "Indica un correo válido" es
+      // accionable, "Revisa los datos" no dice qué revisar.
+      setError(mensajeError(e, "No se pudo guardar. Revisa los datos."));
       setGuardando(false);
     }
   }
@@ -135,12 +146,19 @@ export function NuevoClienteOverlay({ open, onClose, onCreated }: Props) {
           value={telefono}
           onChange={(e) => setTelefono(e.target.value)}
         />
-        <Input
-          label="Email"
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
+        <div className="flex flex-col gap-1.5">
+          <Input
+            label="Email"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          {duplicado && (
+            <p className="text-[12px] text-text-subtle">
+              Ya hay un cliente con este email: {duplicado.nombre}
+            </p>
+          )}
+        </div>
         <ChipGroup<Canal>
           label="Canal de origen"
           options={CANALES}

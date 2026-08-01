@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { AlertCircle } from "lucide-react";
 import { api, type Id } from "@/lib/convexApi";
+import { mensajeError } from "@/lib/errores";
 import { Overlay } from "@/components/ui/Overlay";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -35,6 +36,13 @@ export function EditarClienteOverlay({ cliente, onClose, onSaved }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [guardando, setGuardando] = useState(false);
 
+  // GER-248 — Aviso de posible duplicado, ANTES de guardar. `excluirId` evita que
+  // el propio cliente se avise a sí mismo cuando se edita sin tocar el email.
+  const duplicado = useQuery(
+    api.clientes.buscarPorEmail,
+    email.includes("@") ? { email, excluirId: cliente._id } : "skip",
+  );
+
   async function guardar() {
     setError(null);
     if (!nombre.trim()) {
@@ -56,8 +64,10 @@ export function EditarClienteOverlay({ cliente, onClose, onSaved }: Props) {
       });
       onSaved?.();
       onClose();
-    } catch {
-      setError("No se pudo guardar. Revisa los datos.");
+    } catch (e) {
+      // El mensaje real del servidor importa: "Indica un correo válido" es
+      // accionable, "Revisa los datos" no dice qué revisar.
+      setError(mensajeError(e, "No se pudo guardar. Revisa los datos."));
       setGuardando(false);
     }
   }
@@ -112,12 +122,19 @@ export function EditarClienteOverlay({ cliente, onClose, onSaved }: Props) {
           value={telefono}
           onChange={(e) => setTelefono(e.target.value)}
         />
-        <Input
-          label="Email"
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
+        <div className="flex flex-col gap-1.5">
+          <Input
+            label="Email"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          {duplicado && (
+            <p className="text-[12px] text-text-subtle">
+              Ya hay un cliente con este email: {duplicado.nombre}
+            </p>
+          )}
+        </div>
       </div>
     </Overlay>
   );
