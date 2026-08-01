@@ -51,7 +51,7 @@ export function NuevoClienteOverlay({ open, onClose, onCreated }: Props) {
   // correo, para no lanzar una consulta por cada tecla del campo.
   const duplicado = useQuery(
     api.clientes.buscarPorEmail,
-    email.includes("@") ? { email } : "skip",
+    open && email.includes("@") ? { email } : "skip",
   );
 
   function reset() {
