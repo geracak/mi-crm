@@ -1,8 +1,10 @@
 import { v, ConvexError } from "convex/values";
-import { query, mutation } from "./_generated/server";
+import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
 import type { QueryCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { requireUsuario } from "./authz";
+import { normalizarEmail } from "./emailUtils";
+import { emailClienteOpcional } from "./validaciones";
 
 export const ESTADO_CLIENTE = v.union(
   v.literal("nuevo_lead"),
@@ -134,6 +136,49 @@ export const obtener = query({
   },
 });
 
+/**
+ * GER-248 — Otro cliente que ya use este email, para avisar de un posible duplicado
+ * ANTES de guardar. Devuelve `null` si no lo hay.
+ *
+ * El aviso es PRE-FLIGHT, no transaccional: dos altas simultáneas del mismo email
+ * pueden guardarse ambas sin verlo. Se acepta porque la regla de producto es avisar,
+ * no bloquear — el peor caso de esa carrera es un duplicado sin aviso, que es
+ * exactamente lo que pasaba siempre antes de esta entrega.
+ *
+ * ⚠️ `normalizarEmail` aquí NO es cosmético: el índice guarda el email normalizado,
+ * así que buscar el texto crudo haría que "ANA@x.com" no encontrase "ana@x.com" —
+ * justo el caso que esta función existe para detectar. Normalizar solo en la interfaz
+ * no vale: la clave de búsqueda tiene que llegar normalizada al índice.
+ *
+ * `requireUsuario` no es un detalle de estilo: sin él, cualquiera podría preguntar
+ * "¿tenéis a esta persona como cliente?" y confirmar correos uno a uno.
+ *
+ * `take(2)` en vez de `unique()`: hoy nada impide que haya varios clientes con el
+ * mismo email (de eso avisa), así que `unique()` lanzaría en el caso normal. Se leen
+ * dos para poder descartar el propio documento al editar y quedarse con el otro.
+ */
+export const buscarPorEmail = query({
+  args: {
+    email: v.string(),
+    excluirId: v.optional(v.id("clientes")),
+  },
+  returns: v.union(
+    v.object({ _id: v.id("clientes"), nombre: v.string() }),
+    v.null(),
+  ),
+  handler: async (ctx, args) => {
+    await requireUsuario(ctx);
+    const email = normalizarEmail(args.email);
+    if (email.length === 0) return null;
+    const candidatos = await ctx.db
+      .query("clientes")
+      .withIndex("by_email", (q) => q.eq("email", email))
+      .take(2);
+    const otro = candidatos.find((c) => c._id !== args.excluirId);
+    return otro ? { _id: otro._id, nombre: otro.nombre } : null;
+  },
+});
+
 /** Alta rápida de cliente (F1, base). Requiere nombre y ≥1 medio de contacto. */
 export const crear = mutation({
   args: {
@@ -150,7 +195,7 @@ export const crear = mutation({
     const nombre = args.nombre.trim();
     if (nombre.length === 0) throw new ConvexError("El nombre es obligatorio");
     const telefono = args.telefono?.trim() || undefined;
-    const email = args.email?.trim() || undefined;
+    const email = emailClienteOpcional(args.email);
     if (!telefono && !email) {
       throw new ConvexError("Indica al menos un teléfono o un email");
     }
@@ -186,7 +231,7 @@ export const actualizar = mutation({
     const nombre = args.nombre.trim();
     if (nombre.length === 0) throw new ConvexError("El nombre es obligatorio");
     const telefono = args.telefono?.trim() || undefined;
-    const email = args.email?.trim() || undefined;
+    const email = emailClienteOpcional(args.email);
     if (!telefono && !email) {
       throw new ConvexError("Indica al menos un teléfono o un email");
     }
@@ -198,5 +243,60 @@ export const actualizar = mutation({
       email,
     });
     return null;
+  },
+});
+
+/**
+ * GER-248 — Migración de UNA SOLA VEZ: baja a minúsculas (y recorta) los emails
+ * que ya estaban guardados antes de que el alta los normalizase.
+ *
+ * Sin esto, `buscarPorEmail` no vería las filas históricas: busca la clave
+ * normalizada y solo casaría con las que ya lo estén.
+ *
+ * Se corre a mano tras cada despliegue, primero en dev y luego en prod:
+ *   npx convex run clientes:normalizarEmailsExistentes
+ * y se comprueba con `contarEmailsSinNormalizar`, que debe devolver 0.
+ *
+ * Es idempotente: correrla dos veces no cambia nada la segunda.
+ *
+ * Escala MVP: recorre la tabla entera, igual que `listarConEstado`. Es una
+ * operación única y manual, no una ruta caliente.
+ */
+export const normalizarEmailsExistentes = internalMutation({
+  args: {},
+  returns: v.object({ revisados: v.number(), corregidos: v.number() }),
+  handler: async (ctx) => {
+    const todos = await ctx.db.query("clientes").collect();
+    let corregidos = 0;
+    for (const c of todos) {
+      if (c.email === undefined) continue;
+      const normalizado = normalizarEmail(c.email);
+      if (normalizado === c.email) continue;
+      // Un email que se queda en nada al normalizar era espacios en blanco:
+      // se borra el campo en vez de guardar una cadena vacía.
+      await ctx.db.patch(c._id, {
+        email: normalizado.length === 0 ? undefined : normalizado,
+      });
+      corregidos++;
+    }
+    return { revisados: todos.length, corregidos };
+  },
+});
+
+/**
+ * GER-248 — Sonda de la migración: cuántos clientes tienen el email sin normalizar.
+ * Debe dar 0 en cualquier momento posterior a esta entrega.
+ *
+ * Compara contra `normalizarEmail` y no contra `toLowerCase()` a secas para que el
+ * conteo cubra también los espacios residuales que quita el `trim`.
+ */
+export const contarEmailsSinNormalizar = internalQuery({
+  args: {},
+  returns: v.number(),
+  handler: async (ctx) => {
+    const todos = await ctx.db.query("clientes").collect();
+    return todos.filter(
+      (c) => c.email !== undefined && c.email !== normalizarEmail(c.email),
+    ).length;
   },
 });

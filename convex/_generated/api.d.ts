@@ -23,6 +23,7 @@ import type * as redirectOrigins from "../redirectOrigins.js";
 import type * as seed from "../seed.js";
 import type * as seguimientos from "../seguimientos.js";
 import type * as usuarios from "../usuarios.js";
+import type * as validaciones from "../validaciones.js";
 import type * as ventas from "../ventas.js";
 
 import type {
@@ -47,6 +48,7 @@ declare const fullApi: ApiFromModules<{
   seed: typeof seed;
   seguimientos: typeof seguimientos;
   usuarios: typeof usuarios;
+  validaciones: typeof validaciones;
   ventas: typeof ventas;
 }>;
 
