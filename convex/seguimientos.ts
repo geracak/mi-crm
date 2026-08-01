@@ -1,9 +1,8 @@
 import { v, ConvexError } from "convex/values";
 import { query, mutation } from "./_generated/server";
 import { requireUsuario } from "./authz";
-import { estadoDesdeVentas, ESTADO_CLIENTE } from "./clientes";
+import { estadoDe, ESTADO_CLIENTE } from "./clientes";
 import { assertFechaISO } from "./fechas";
-import type { Doc, Id } from "./_generated/dataModel";
 
 /**
  * Todos los seguimientos pendientes del negocio, con datos del cliente y del
@@ -15,6 +14,14 @@ import type { Doc, Id } from "./_generated/dataModel";
  * una vez por fila: antes, dos pendientes del mismo cliente pagaban dos `db.get`
  * del cliente, dos del responsable y dos recorridos de sus ventas, todos
  * idénticos. Pasa de `1 + 3P` a `1 + 2·(clientes únicos) + (responsables únicos)`.
+ *
+ * ⚠️ El estado se resuelve con `estadoDe` (índice `ventas.by_cliente_fecha`, una
+ * consulta ACOTADA por cliente), NO con un `collect()` de toda la tabla `ventas`:
+ * esta función no lista todos los clientes del negocio, solo los que tienen
+ * pendientes — un `collect()` global leería ventas de clientes que ni aparecen
+ * en el resultado (con 0 pendientes, leería la tabla entera igual). Ese es el
+ * error que corrigió esta misma línea tras la revisión: `listarConEstado` SÍ
+ * puede agrupar toda `ventas` porque ahí sí se listan todos los clientes; aquí no.
  */
 export const pendientesConCliente = query({
   args: {},
@@ -41,29 +48,16 @@ export const pendientesConCliente = query({
     const clienteIds = [...new Set(pend.map((s) => s.clienteId))];
     const responsableIds = [...new Set(pend.map((s) => s.responsableId))];
 
-    const [clientes, responsables] = await Promise.all([
+    const [clientes, responsables, estados] = await Promise.all([
       Promise.all(clienteIds.map((id) => ctx.db.get(id))),
       Promise.all(responsableIds.map((id) => ctx.db.get(id))),
+      Promise.all(clienteIds.map((id) => estadoDe(ctx, id))),
     ]);
     const clientePorId = new Map(clienteIds.map((id, i) => [id, clientes[i]]));
     const responsablePorId = new Map(
       responsableIds.map((id, i) => [id, responsables[i]]),
     );
-
-    // Estado por cliente único: una sola consulta agrupada, igual que en
-    // `listarConEstado` — mismo criterio, misma invariante (no hay ventas
-    // huérfanas: `ventas.crear` valida el cliente y `clienteId` no se edita).
-    const todasLasVentas = await ctx.db.query("ventas").collect();
-    const ventasPorCliente = new Map<Id<"clientes">, Doc<"ventas">[]>();
-    for (const venta of todasLasVentas) {
-      if (!clientePorId.has(venta.clienteId)) continue;
-      const grupo = ventasPorCliente.get(venta.clienteId);
-      if (grupo) grupo.push(venta);
-      else ventasPorCliente.set(venta.clienteId, [venta]);
-    }
-    const estadoPorCliente = new Map(
-      clienteIds.map((id) => [id, estadoDesdeVentas(ventasPorCliente.get(id) ?? [])]),
-    );
+    const estadoPorCliente = new Map(clienteIds.map((id, i) => [id, estados[i]]));
 
     return pend.map((s) => ({
       _id: s._id,
