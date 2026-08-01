@@ -40,8 +40,8 @@ export function Sidebar() {
               className={cn(
                 "flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[15px] transition-colors",
                 active
-                  ? "bg-primary-subtle font-semibold text-primary"
-                  : "font-medium text-text-muted hover:bg-surface-2",
+                  ? "bg-primary-subtle font-semibold text-blue-600 dark:text-blue-400"
+                  : "font-medium text-blue-600/70 hover:bg-surface-2 dark:text-blue-400/70",
               )}
             >
               <Icon className="size-5" aria-hidden />

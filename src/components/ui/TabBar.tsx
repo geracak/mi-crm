@@ -35,7 +35,9 @@ export function TabBar({ items, className }: TabBarProps) {
             href={item.href}
             className={cn(
               "flex min-h-14 flex-1 flex-col items-center justify-center gap-0.5 py-1.5",
-              active ? "font-semibold text-primary" : "font-medium text-text-subtle",
+              active
+                ? "font-semibold text-blue-600 dark:text-blue-400"
+                : "font-medium text-blue-600/70 dark:text-blue-400/70",
             )}
           >
             <Icon className="size-[22px]" />

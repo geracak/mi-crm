@@ -37,7 +37,7 @@ export function MobileHeader() {
           <ChevronLeft className="size-[22px]" aria-hidden />
         </button>
       )}
-      <h2 className="flex-1 truncate pl-1 text-[17px] font-semibold text-text">
+      <h2 className="flex-1 truncate pl-1 text-[17px] font-semibold text-blue-600 dark:text-blue-400">
         {title}
       </h2>
       {!enCuenta && (
