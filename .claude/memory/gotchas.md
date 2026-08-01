@@ -309,3 +309,29 @@ un elemento por otro.
 
 **Verificación:** todo cambio de contrato o de inventario en un plan lleva pegada la salida
 literal del grep que lo respalda, no una afirmación de memoria.
+
+---
+
+## 2026-08-01 · "Cubrí todos los writers" necesita un grep fresco después de implementar, no solo el inventario del plan
+
+**Categoría:** revisión / Convex
+
+**Qué pasó:** en GER-251 el plan enumeró tres writers de `users.name`/`email` (`/equipo`, `/cuenta`, invitación) más la defensa final en `auth.ts`, y se implementaron los cuatro. La revisión encontró un QUINTO writer real: `authMaintenance.ts:200` (`migrarIdentificadorPassword`), que escribe `users.email` con el mismo valor que también termina en `authAccounts.providerAccountId`. No estaba en el inventario porque es una función de mantenimiento (`internalMutation` de uso manual), no una ruta de producto, y el inventario original se construyó pensando en flujos de usuario, no en scripts de operación.
+
+**Causa raíz:** un inventario de "todos los puntos donde se escribe X" que se arma leyendo las rutas de producto (mutations públicas, actions) se olvida sistemáticamente de las `internalMutation`/`internalAction` de mantenimiento — son código real que escribe el mismo campo, pero viven fuera de los archivos que un product-flow-first review recorre primero.
+
+**Regla preventiva:** al cerrar una issue que promete "cubre TODOS los writers de un campo", correr `grep -rn "\.patch(\|\.insert(" convex/*.ts | grep <campo>` (no `grep` limitado a los archivos que ya se tocaron) sobre el estado FINAL del cambio, incluyendo explícitamente `authMaintenance.ts` y cualquier otro archivo de mantenimiento/migración. El inventario del plan es el punto de partida, no la fuente de verdad final — la fuente de verdad es el grep sobre el código tal como quedó.
+
+**Verificación:** en E1 ya había pasado una vez con `users.name` (dos writers, no tres); en E3 volvió a pasar con un cuarto/quinto writer real. Es un patrón de 2+ ocurrencias — la próxima vez que aparezca, pasa a regla explícita del checklist de cierre de cualquier issue de tipo "cerrar huecos de validación".
+
+---
+
+## 2026-08-01 · `convex/_generated/api.d.ts` se marca modificado tras cada `npx convex dev --once` en Windows, sin contenido real
+
+**Categoría:** tooling / Windows + Convex
+
+**Qué pasó:** cada vez que se corrió `npx convex dev --once` (varias veces por sesión, una por cada verificación de typecheck), `git status` mostraba `convex/_generated/api.d.ts` como modificado. `git diff` no mostraba ningún cambio de contenido, solo el warning `LF will be replaced by CRLF the next time Git touches it`. Confirmado repetidas veces con `git diff --stat` (vacío) y comparando que ningún commit lo incluyera.
+
+**Causa raíz:** el archivo está commiteado con saltos de línea LF, pero Convex lo regenera en cada `dev`/`codegen` con los saltos de línea nativos de Windows (CRLF), y el `core.autocrlf` del repo no lo normaliza de forma estable — cada regeneración vuelve a marcarlo como "sucio" aunque el contenido semántico sea idéntico.
+
+**Regla preventiva:** antes de cada `git add`/commit, correr `git checkout -- convex/_generated/api.d.ts` (o cualquier archivo generado que muestre el mismo patrón) y NUNCA incluirlo en `git add -A`. Añadir explícitamente los archivos reales por nombre (`git add convex/foo.ts convex/bar.ts`), como ya indica la Regla Absoluta de "nunca `git add -A`". Si el ruido molesta de forma persistente, la solución de raíz sería un `.gitattributes` que fije `convex/_generated/*.d.ts text eol=lf`, pero eso es un cambio de configuración aparte, no algo para decidir de paso.
