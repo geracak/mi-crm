@@ -53,3 +53,16 @@ next-env.d.ts
 
 # claude code local settings (per-machine, no compartir)
 **/.claude/settings.local.json
+
+# archivos temporales de trabajo (scratch, volcados, artefactos de scripts)
+/tmp/
+/temp/
+*.tmp
+
+# copias de seguridad (nunca commitear: suelen arrastrar datos o credenciales)
+/backup/
+/backups/
+*.bak
+*.orig
+*.sql.gz
+*.dump
